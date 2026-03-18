@@ -1,0 +1,21 @@
+{
+  "id": "dynamic-item-builder",
+  "title": "Dynamic Item Builder",
+  "version": "1.0.0",
+  "compatibility": {
+    "minimum": "13",
+    "verified": "13"
+  },
+  "authors": [
+    {
+      "name": "GravyBoat, DragonsDrinkFree",
+      "flags": {}
+    }
+  ],
+  "esmodules": ["scripts/main.js"],
+  "styles": ["styles/dynamic-item-builder.css"],
+  "flags": {
+    "canUpload": true
+  },
+  "description": "Import items from PDF rulebooks using configurable regex and table-parsing rules. Define rules per item type, preview results live, then batch-create Foundry items."
+}
