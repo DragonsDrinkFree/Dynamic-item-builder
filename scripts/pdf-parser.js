@@ -35,6 +35,37 @@ export async function loadPDF(file) {
 }
 
 /**
+ * Render a single PDF page onto a <canvas> element, scaling to fit a target
+ * pixel width (defaults to the page's natural width at 1× scale).
+ * Returns { scale, pdfWidth, pdfHeight } so callers can convert between
+ * screen pixels and PDF coordinate space.
+ *
+ * @param {Object}            pdfDoc      loadPDF() result
+ * @param {number}            pageNum     1-based page number
+ * @param {HTMLCanvasElement} canvas      target canvas element
+ * @param {number|null}       targetWidth optional pixel width to scale into
+ */
+export async function renderPageToCanvas(pdfDoc, pageNum, canvas, targetWidth = null) {
+  const page         = await pdfDoc.getPage(pageNum);
+  const baseViewport = page.getViewport({ scale: 1.0 });
+  const scale        = targetWidth ? targetWidth / baseViewport.width : 1.0;
+  const viewport     = page.getViewport({ scale });
+
+  canvas.width  = Math.round(viewport.width);
+  canvas.height = Math.round(viewport.height);
+
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: ctx, viewport }).promise;
+
+  return {
+    scale,
+    pdfWidth:  baseViewport.width,
+    pdfHeight: baseViewport.height
+  };
+}
+
+/**
  * Extract all text items from a single page with position and font metadata.
  */
 export async function extractPageText(pdfDoc, pageNum) {
@@ -186,65 +217,92 @@ export function detectColumns(headerRow) {
 }
 
 /**
- * Find X positions where a consistent, dominant gap divides items into
- * separate horizontal groups (e.g., two tables placed side-by-side in the PDF).
+ * Find X positions where a gap divides rows into separate side-by-side tables.
  *
- * For each row with ≥3 items, the largest inter-item gap is recorded if it is
- * both ≥ minGap pts absolute AND ≥ minRatio × the average gap in that row.
- * If such a gap appears in ≥ minConsistency fraction of qualifying rows at
- * roughly the same X position, that X is returned as a divider.
+ * Unlike a simple "largest gap" approach, this uses row-coverage asymmetry:
+ * a true inter-table gap will have many rows with items on only one side,
+ * whereas a within-table gap (e.g. a wide Name column) has rows spanning both
+ * sides.
  *
- * @param {Array}  rows            output of groupIntoRows
- * @param {number} minGap          minimum absolute gap (PDF points)
- * @param {number} minRatio        max-gap / avg-gap threshold
- * @param {number} minConsistency  fraction of qualifying rows required
- * @returns {number[]}  sorted divider X positions
+ * Algorithm:
+ *   1. Split rows into Y-continuous segments (Y gap > 20 pts) so that page
+ *      headers/footers between tables don't pollute the analysis.
+ *   2. In each Y-segment, cluster all item X positions into column bands
+ *      (items within 15 pts = same column center).
+ *   3. For each inter-column gap ≥ 30 pts (left-to-right), count how many
+ *      rows have items only left, only right, or on both sides of the gap.
+ *   4. If asymmetric rows ≥ 2 AND ≥ 25 % of total rows in the segment, this
+ *      gap is a table boundary — record its midpoint and stop (recursion in
+ *      detectTables() handles further splits within each band).
+ *
+ * @param {Array}  rows  output of groupIntoRows
+ * @returns {number[]}   sorted divider X positions
  */
-function findXGroupDividers(rows, minGap = 40, minRatio = 2.0, minConsistency = 0.3) {
-  const candidates = [];
+function findXGroupDividers(rows) {
+  if (!rows.length) return [];
 
-  for (const row of rows) {
-    if (row.items.length < 3) continue;
-    const sorted = [...row.items].sort((a, b) => a.x - b.x);
+  // Step 1: split into Y-continuous segments
+  const yGroups = [[rows[0]]];
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i].y - rows[i - 1].y > 20) yGroups.push([]);
+    yGroups[yGroups.length - 1].push(rows[i]);
+  }
 
-    const gaps = [];
-    for (let i = 1; i < sorted.length; i++) {
-      const prevEnd = sorted[i - 1].x + Math.max(sorted[i - 1].width ?? 1, 1);
-      const gap     = sorted[i].x - prevEnd;
-      gaps.push({ gap, midX: prevEnd + gap / 2 });
+  const dividers = [];
+
+  for (const grp of yGroups) {
+    // Only consider rows with ≥2 items (single-item rows are titles/prose)
+    const tRows = grp.filter(r => r.items.length >= 2);
+    if (tRows.length < 3) continue;
+
+    // Step 2: cluster all X positions into column band centers
+    const xs = tRows.flatMap(r => r.items.map(i => i.x)).sort((a, b) => a - b);
+    const colCenters = [];
+    let band = [xs[0]];
+    for (let i = 1; i < xs.length; i++) {
+      if (xs[i] - xs[i - 1] <= 15) {
+        band.push(xs[i]);
+      } else {
+        colCenters.push(band.reduce((s, x) => s + x, 0) / band.length);
+        band = [xs[i]];
+      }
     }
+    colCenters.push(band.reduce((s, x) => s + x, 0) / band.length);
 
-    const avgGap  = gaps.reduce((s, g) => s + g.gap, 0) / gaps.length;
-    const maxEntry = gaps.reduce((a, b) => (a.gap >= b.gap ? a : b));
+    // Need at least 3 column bands to have a meaningful split
+    if (colCenters.length < 3) continue;
 
-    if (maxEntry.gap >= minGap && maxEntry.gap >= avgGap * minRatio) {
-      candidates.push(maxEntry.midX);
+    // Steps 3-4: scan gaps left-to-right, stop at first asymmetric one
+    for (let i = 1; i < colCenters.length; i++) {
+      const gap = colCenters[i] - colCenters[i - 1];
+      if (gap < 30) continue;
+
+      const splitX = (colCenters[i - 1] + colCenters[i]) / 2;
+      let leftOnly = 0, rightOnly = 0, both = 0;
+
+      for (const row of tRows) {
+        const L = row.items.some(it => it.x <  splitX);
+        const R = row.items.some(it => it.x >= splitX);
+        if (L && R)   both++;
+        else if (L)   leftOnly++;
+        else          rightOnly++;
+      }
+
+      const oneSided = leftOnly + rightOnly;
+      const total    = oneSided + both;
+
+      // Require exclusive rows on BOTH sides — a sparse column (e.g. armour
+      // names only on some rows) produces rightOnly > 0 but leftOnly = 0, which
+      // is NOT a table boundary.  True side-by-side tables have rows that belong
+      // exclusively to each side.
+      if (leftOnly >= 1 && rightOnly >= 1 && oneSided >= 2 && oneSided / total >= 0.25) {
+        dividers.push(splitX);
+        break; // leftmost gap only; recursion handles further splits
+      }
     }
   }
 
-  if (!candidates.length) return [];
-
-  // Cluster nearby candidates
-  candidates.sort((a, b) => a - b);
-  const clusters = [];
-  let cluster = [candidates[0]];
-  for (let i = 1; i < candidates.length; i++) {
-    if (candidates[i] - candidates[i - 1] <= 60) {
-      cluster.push(candidates[i]);
-    } else {
-      clusters.push(cluster);
-      cluster = [candidates[i]];
-    }
-  }
-  clusters.push(cluster);
-
-  const qualifyingCount = rows.filter(r => r.items.length >= 3).length;
-  if (qualifyingCount === 0) return [];
-
-  return clusters
-    .filter(cl => cl.length / qualifyingCount >= minConsistency)
-    .map(cl => cl.reduce((s, x) => s + x, 0) / cl.length)
-    .sort((a, b) => a - b);
+  return dividers.sort((a, b) => a - b);
 }
 
 /**
@@ -258,7 +316,7 @@ function findXGroupDividers(rows, minGap = 40, minRatio = 2.0, minConsistency = 
  *
  * Each table.rows entry: { cells: [{column, value}], rawText }
  */
-export function detectTables(items, rowThreshold = 4) {
+export function detectTables(items, rowThreshold = 8) {
   const rows = groupIntoRows(items, rowThreshold);
 
   // Detect side-by-side tables: if a dominant X gap splits all rows into
@@ -303,11 +361,20 @@ export function detectTables(items, rowThreshold = 4) {
       proseRows.push(...seg.rows);
       continue;
     }
-    // Build a table from this segment
+    // Build a table from this segment.
+    // First verify the header row looks like genuine column headers (not a
+    // sentence or page title that happens to have multiple items).
     const headerRow = seg.rows[0];
-    const columns   = detectColumns(headerRow);
-    const dataRows  = seg.rows.slice(1);
-    const cellMaps  = mapRowsToCells(dataRows, columns);
+    if (!isPlausibleHeaderRow(headerRow)) {
+      proseRows.push(...seg.rows);
+      continue;
+    }
+    const baseColumns = detectColumns(headerRow);
+    const dataRows    = seg.rows.slice(1);
+    // Extend with synthetic columns for any consistent orphan X bands in data rows
+    // (handles PDFs where the first column has no header label, e.g. item names).
+    const columns  = addOrphanColumns(baseColumns, dataRows);
+    const cellMaps = mapRowsToCells(dataRows, columns);
 
     tables.push({
       id: `tbl-${tables.length}`,
@@ -322,6 +389,70 @@ export function detectTables(items, rowThreshold = 4) {
   }
 
   return { tables, proseRows };
+}
+
+/**
+ * Returns true if a row looks like a genuine column-header row.
+ * Real table headers have meaningful whitespace between items (column gaps).
+ * Tightly-packed items are sentence/title fragments (e.g. "Part Six Equipment").
+ */
+function isPlausibleHeaderRow(row) {
+  if (row.items.length < 2) return false;
+  const sorted = [...row.items].sort((a, b) => a.x - b.x);
+  let totalGap = 0;
+  for (let i = 1; i < sorted.length; i++) {
+    const prevEnd = sorted[i - 1].x + Math.max(sorted[i - 1].width ?? 0, 1);
+    totalGap += Math.max(0, sorted[i].x - prevEnd);
+  }
+  return (totalGap / (sorted.length - 1)) >= 15;
+}
+
+/**
+ * Detect items in data rows that fall outside every detected column and cluster
+ * them into synthetic columns (e.g. an unlabelled "Name" column to the left of
+ * the first labelled header).  Only adds a column when the orphan band appears
+ * in ≥ 30 % of data rows, so stray items don't pollute the structure.
+ */
+function addOrphanColumns(columns, dataRows) {
+  if (!columns.length || !dataRows.length) return columns;
+
+  const orphanXs = [];
+  for (const row of dataRows) {
+    for (const item of row.items) {
+      if (!columns.some(c => item.x >= c.x - 15 && item.x < c.xEnd)) {
+        orphanXs.push(item.x);
+      }
+    }
+  }
+  if (!orphanXs.length) return columns;
+
+  // Cluster orphan X positions into bands (items within 15 pts = same column)
+  orphanXs.sort((a, b) => a - b);
+  const bands = [[orphanXs[0]]];
+  for (let i = 1; i < orphanXs.length; i++) {
+    if (orphanXs[i] - orphanXs[i - 1] <= 15) bands[bands.length - 1].push(orphanXs[i]);
+    else bands.push([orphanXs[i]]);
+  }
+
+  // Keep only bands that appear in ≥ 30 % of data rows
+  const minCount = Math.max(2, dataRows.length * 0.3);
+  const synthXs = bands
+    .filter(b => b.length >= minCount)
+    .map(b => b.reduce((s, x) => s + x, 0) / b.length);
+  if (!synthXs.length) return columns;
+
+  const sortedCols = [...columns].sort((a, b) => a.x - b.x);
+  const allCols = [...columns];
+  for (const cx of synthXs) {
+    const nextCol = sortedCols.find(c => c.x > cx);
+    allCols.push({
+      index: allCols.length,
+      header: '',          // unlabelled — displayed as blank in the scan UI
+      x: cx - 5,
+      xEnd: nextCol ? nextCol.x : cx + 200
+    });
+  }
+  return allCols.sort((a, b) => a.x - b.x).map((c, i) => ({ ...c, index: i }));
 }
 
 function escapeRegex(str) {

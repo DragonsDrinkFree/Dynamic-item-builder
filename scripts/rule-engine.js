@@ -3,7 +3,7 @@
  * an array of detected items: [{ name, [foundryField]: value, ... }]
  */
 
-import { extractPages, parsePageString, mergePageItems, groupIntoRows, detectColumns, mapRowsToCells } from './pdf-parser.js';
+import { extractPages, parsePageString, mergePageItems, groupIntoRows, detectColumns, mapRowsToCells, detectTables } from './pdf-parser.js';
 
 /**
  * Apply a rule to a loaded PDF document.
@@ -13,10 +13,17 @@ import { extractPages, parsePageString, mergePageItems, groupIntoRows, detectCol
  */
 export async function applyRule(rule, pdfDoc) {
   const pageNums = parsePageString(rule.pages ?? '1', pdfDoc.numPages);
-  const pages = await extractPages(pdfDoc, pageNums);
-  let items = mergePageItems(pages);
+  const pages    = await extractPages(pdfDoc, pageNums);
 
-  // Apply optional font filter
+  // Region-based path: when the user has painted table regions, use the same
+  // detectTables() pipeline as the Table Preview so column structure is identical.
+  const tableRegions = (rule.regions ?? []).filter(r => r.type === 'table');
+  if (tableRegions.length > 0) {
+    return applyRuleWithRegions(rule, pages, tableRegions);
+  }
+
+  // Legacy path (no regions defined)
+  let items = mergePageItems(pages);
   items = applyFontFilter(items, rule.fontFilter);
 
   switch (rule.contentType) {
@@ -25,6 +32,73 @@ export async function applyRule(rule, pdfDoc) {
     case 'mixed':  return parseMixed(items, rule);
     default:       return parseTable(items, rule);
   }
+}
+
+/**
+ * Region-aware extraction path.
+ * Mirrors the collation logic in DynamicItemBuilderApp.#scanTableRegions so that
+ * the column structure seen in Table Preview exactly matches what is extracted here.
+ */
+function applyRuleWithRegions(rule, pages, regions) {
+  // Group regions by their `group` key, in page→Y order
+  const groups = new Map();
+  for (const region of [...regions].sort((a, b) => a.page - b.page || a.y - b.y)) {
+    if (!groups.has(region.group)) groups.set(region.group, []);
+    groups.get(region.group).push(region);
+  }
+
+  const skipRe  = rule.skipPattern?.trim() ? safeRegex(rule.skipPattern) : null;
+  const results = [];
+
+  for (const [, groupRegions] of groups) {
+    let yOffset    = 0;
+    const groupItems = [];
+
+    for (const region of groupRegions) {
+      const page = pages.find(p => p.pageNum === region.page);
+      if (!page) continue;
+      const regionItems = page.items.filter(item =>
+        item.x >= region.x            &&
+        item.x <= region.x + region.w &&
+        item.y >= region.y            &&
+        item.y <= region.y + region.h
+      );
+      for (const item of regionItems) {
+        groupItems.push({ ...item, y: item.y + yOffset });
+      }
+      if (regionItems.length) {
+        yOffset += Math.max(...regionItems.map(i => i.y)) + 50;
+      }
+    }
+
+    if (!groupItems.length) continue;
+
+    // Use detectTables (identical to Table Preview) for consistent column layout
+    const scanResult = detectTables(groupItems);
+
+    for (const table of scanResult.tables) {
+      // Build index column map for _colN fallback keys
+      const colIndexMap = {};
+      table.columns.forEach((col, i) => { colIndexMap[col.header] = i; });
+
+      for (const row of table.rows) {
+        const cells = {};
+        for (const cell of row.cells) {
+          cells[cell.column] = cell.value;
+          cells[`_col${colIndexMap[cell.column] ?? 0}`] = cell.value;
+        }
+
+        const rowText = row.rawText ?? Object.values(cells).join(' ').trim();
+        if (!rowText.trim()) continue;
+        if (skipRe?.test(rowText)) continue;
+
+        const item = extractAttributes(cells, rule.attributes, 'table', rule);
+        if (item) results.push(item);
+      }
+    }
+  }
+
+  return results;
 }
 
 // ---------------------------------------------------------------------------

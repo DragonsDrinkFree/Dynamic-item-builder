@@ -963,3 +963,319 @@ div.ignore-tr {
 .dib-open-btn:hover {
   background: var(--color-hover, rgba(255,255,255,0.06));
 }
+
+/* ============================================================
+   PDF PLANNER — center panel additions
+   ============================================================ */
+
+/* Shared top bar — compact single-row strip above center tabs */
+.dib-planner-topbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--dib-border);
+  background: var(--dib-bg-2);
+}
+.dib-topbar-input {
+  flex: 1;
+  padding: 3px 6px;
+  font-size: 12px;
+  background: var(--dib-bg-input);
+  border: 1px solid var(--dib-border);
+  border-radius: 3px;
+  color: var(--dib-text);
+  min-width: 0;
+}
+.dib-topbar-input:focus { border-color: var(--dib-border-hi); outline: none; }
+.dib-topbar-input::placeholder { color: var(--dib-text-muted); }
+.dib-topbar-select {
+  flex: 0 0 140px;
+  padding: 3px 6px;
+  font-size: 12px;
+  background: var(--dib-bg-input);
+  border: 1px solid var(--dib-border);
+  border-radius: 3px;
+  color: var(--dib-text);
+}
+
+/* Center tab bar */
+.dib-center-tab-bar {
+  display: flex;
+  flex-shrink: 0;
+  border-bottom: 2px solid var(--dib-border);
+  background: var(--dib-bg-2);
+  padding: 0 8px;
+  gap: 2px;
+}
+
+/* Planner toolbar (page nav + draw tools) */
+.dib-planner-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--dib-border);
+  background: var(--dib-bg-2);
+  flex-wrap: wrap;
+}
+
+.dib-planner-page-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.dib-planner-page-label {
+  font-size: 0.82em;
+  min-width: 48px;
+  text-align: center;
+  color: var(--dib-text-muted);
+}
+
+.dib-planner-tools {
+  display: flex;
+  gap: 4px;
+}
+
+/* Draw mode toggle buttons */
+.dib-draw-btn { opacity: 0.7; }
+.dib-draw-btn:hover { opacity: 1; }
+.dib-draw-btn.active {
+  opacity: 1;
+  background: rgba(76,175,80,0.15);
+  border-color: #4caf50;
+  color: #4caf50;
+}
+.dib-draw-btn[data-draw-mode="text"].active {
+  background: rgba(33,150,243,0.15);
+  border-color: #2196f3;
+  color: #2196f3;
+}
+
+/* Planner content: canvas + sidebar side by side */
+.dib-planner-content {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Canvas scroll area */
+.dib-planner-canvas-wrap {
+  flex: 1;
+  overflow: auto;
+  padding: 10px;
+  background: #0e0e12;
+}
+.dib-planner-canvas-wrap.draw-active { cursor: crosshair; }
+
+/* PDF viewport container (positions overlay on top of canvas) */
+.dib-pdf-viewport {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+  box-shadow: 0 2px 16px rgba(0,0,0,0.7);
+}
+
+#dib-pdf-canvas {
+  display: block;
+}
+
+/* Region overlay (fills the viewport exactly) */
+.dib-region-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none; /* overlay itself is transparent; children opt in */
+}
+
+/* Region rectangles */
+.dib-region {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid;
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  overflow: hidden;
+  min-width: 6px;
+  min-height: 6px;
+}
+.dib-region-table {
+  border-color: rgba(76,175,80,0.9);
+  background: rgba(76,175,80,0.10);
+}
+.dib-region-text {
+  border-color: rgba(33,150,243,0.9);
+  background: rgba(33,150,243,0.10);
+}
+.dib-region-drawing {
+  border-style: dashed;
+  pointer-events: none;
+  opacity: 0.75;
+}
+
+.dib-region-label {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 4px;
+  background: rgba(0,0,0,0.65);
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 80%;
+  line-height: 1.4;
+}
+
+.dib-region-delete {
+  background: rgba(0,0,0,0.65);
+  border: none;
+  color: #f77;
+  padding: 1px 4px;
+  cursor: pointer;
+  font-size: 9px;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+.dib-region-delete:hover { background: rgba(180,0,0,0.8); color: #fff; }
+
+/* Region sidebar */
+.dib-region-sidebar {
+  width: 195px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--dib-border);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--dib-bg-1);
+}
+
+.dib-region-sidebar-header {
+  font-size: 0.72em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--dib-text-muted);
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--dib-border);
+  flex-shrink: 0;
+  background: var(--dib-bg-2);
+}
+
+.dib-region-list-item {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--dib-border);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-left: 3px solid transparent;
+}
+.dib-region-item-table { border-left-color: #4caf50; }
+.dib-region-item-text  { border-left-color: #2196f3; }
+
+.dib-region-item-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.dib-region-type-badge {
+  font-size: 8px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 1px 4px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  letter-spacing: 0.04em;
+}
+.dib-region-item-table .dib-region-type-badge {
+  background: rgba(76,175,80,0.2); color: #4caf50;
+}
+.dib-region-item-text .dib-region-type-badge {
+  background: rgba(33,150,243,0.2); color: #2196f3;
+}
+
+.dib-region-label-input {
+  flex: 1;
+  font-size: 11px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: inherit;
+  padding: 1px 3px;
+  min-width: 0;
+  border-radius: 2px;
+}
+.dib-region-label-input:focus {
+  border-color: var(--dib-border-hi);
+  background: var(--dib-bg-input);
+  outline: none;
+}
+
+.dib-region-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--dib-text-muted);
+}
+
+.dib-region-page-tag {
+  flex-shrink: 0;
+  font-size: 9px;
+  background: var(--dib-bg-3);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+.dib-region-group-input {
+  flex: 1;
+  font-size: 10px;
+  background: var(--dib-bg-input);
+  border: 1px solid var(--dib-border);
+  color: var(--dib-text-muted);
+  padding: 1px 4px;
+  border-radius: 2px;
+  min-width: 0;
+}
+.dib-region-group-input:focus {
+  border-color: var(--dib-border-hi);
+  color: var(--dib-text);
+  outline: none;
+}
+
+.dib-region-del-btn {
+  flex-shrink: 0;
+  padding: 1px 4px !important;
+  font-size: 9px !important;
+}
+
+.dib-region-empty {
+  font-size: 0.78em;
+  color: var(--dib-text-muted);
+  padding: 16px 12px;
+  text-align: center;
+  font-style: italic;
+  line-height: 1.6;
+}
+.dib-region-empty i { display: block; font-size: 1.6em; margin-bottom: 6px; opacity: 0.4; }
+
+/* Tab badge colour variant for text regions */
+.dib-tab-badge-text {
+  background: rgba(33,150,243,0.25);
+  color: #64b5f6;
+}
+
+/* Unlabeled column header style */
+.dib-unlabeled {
+  color: var(--dib-text-muted);
+  font-style: italic;
+  font-size: 0.85em;
+}
+
+/* Item Planner tab — make rule editor inner scrollable within tab panel */
+#dib-center-item-planner.dib-tab-panel.active {
+  overflow-y: auto;
+}

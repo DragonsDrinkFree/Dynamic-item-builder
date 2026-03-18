@@ -30,19 +30,6 @@
               {{#unless hasPdf}}disabled{{/unless}}>
         <i class="fas fa-sync-alt {{#if previewLoading}}fa-spin{{/if}}"></i> Refresh
       </button>
-      <label class="dib-folder-label" for="dib-folder-select">
-        <i class="fas fa-folder"></i>
-      </label>
-      <select id="dib-folder-select" class="dib-folder-select"
-              title="Destination folder for created items">
-        <option value="">— No Folder (root) —</option>
-        {{#each itemFolders}}
-        <option value="{{this.id}}"
-                {{#if (eq this.id ../selectedFolderId)}}selected{{/if}}>
-          {{this.name}}
-        </option>
-        {{/each}}
-      </select>
       <button type="button" data-action="buildItems" class="dib-btn dib-btn-primary"
               {{#unless hasPdf}}disabled{{/unless}}>
         <i class="fas fa-hammer"></i> Build Items
@@ -98,242 +85,375 @@
     </aside>
 
     {{!-- ──────────────────────────
-         CENTER: Rule Editor
+         CENTER: Planning Section
+         Top bar: Pages + Item Type (shared across both tabs)
+         Tab 1: PDF Planner (canvas + region painter)
+         Tab 2: Item Planner (rule editor / attribute mapping)
     ────────────────────────── --}}
     <section class="dib-panel dib-panel-editor">
-      <div class="dib-panel-header">
-        <span class="dib-panel-title">
-          {{#if selectedRule}}Editing: <em>{{selectedRule.name}}</em>{{else}}Rule Editor{{/if}}
-        </span>
-      </div>
 
       {{#if selectedRule}}
-      <div class="rule-editor-inner">
 
-        {{!-- Meta --}}
-        <fieldset class="dib-fieldset">
-          <legend>General</legend>
-          <div class="dib-form-row">
-            <div class="dib-field dib-field-grow">
-              <label>Rule Name</label>
-              <input type="text" data-field="name" value="{{selectedRule.name}}">
-            </div>
-            <div class="dib-field">
-              <label>Item Type</label>
-              <select data-field="itemType">
-                <option value="">— select —</option>
-                {{#each itemTypes}}
-                <option value="{{this.value}}"
-                        {{#if (eq this.value ../selectedRule.itemType)}}selected{{/if}}>
-                  {{this.label}}
-                </option>
-                {{/each}}
-              </select>
-            </div>
-          </div>
-
-          <div class="dib-form-row">
-            <div class="dib-field dib-field-grow">
-              <label>Pages</label>
-              <input type="text" data-field="pages"
-                     value="{{selectedRule.pages}}"
-                     placeholder="e.g. 1-25, 45, 50-60">
-            </div>
-            <div class="dib-field dib-field-grow">
-              <label>Content Type</label>
-              <select data-field="contentType">
-                {{#each contentTypes}}
-                <option value="{{this.value}}"
-                        {{#if (eq this.value ../selectedRule.contentType)}}selected{{/if}}>
-                  {{this.label}}
-                </option>
-                {{/each}}
-              </select>
-            </div>
-          </div>
-        </fieldset>
-
-        {{!-- Detection patterns --}}
-        <fieldset class="dib-fieldset">
-          <legend>Detection Patterns</legend>
-
-          {{#if (eq selectedRule.contentType "table")}}
-          <div class="dib-field">
-            <label>Header Row Pattern
-              <span class="dib-hint">Regex that matches any text in the column header row</span>
-            </label>
-            <input type="text" data-field="headerPattern"
-                   value="{{selectedRule.headerPattern}}"
-                   placeholder="e.g. Weapon|Name|Item">
-          </div>
-          {{/if}}
-
-          {{#if (eq selectedRule.contentType "column")}}
-          <div class="dib-field">
-            <label>Item Start Pattern
-              <span class="dib-hint">Regex that marks the beginning of each item in prose text</span>
-            </label>
-            <input type="text" data-field="rowDetectionPattern"
-                   value="{{selectedRule.rowDetectionPattern}}"
-                   placeholder="e.g. ^[A-Z][a-z]+ [\w]+ \(">
-          </div>
-          {{/if}}
-
-          {{#if (eq selectedRule.contentType "mixed")}}
-          <div class="dib-field">
-            <label>Item Start Pattern
-              <span class="dib-hint">For prose side of mixed layout</span>
-            </label>
-            <input type="text" data-field="rowDetectionPattern"
-                   value="{{selectedRule.rowDetectionPattern}}"
-                   placeholder="Regex to detect item start in prose column">
-          </div>
-          <div class="dib-field">
-            <label>Description Target Field
-              <span class="dib-hint">e.g. system.description</span>
-            </label>
-            <input type="text" data-field="descriptionField"
-                   value="{{selectedRule.descriptionField}}"
-                   placeholder="system.description">
-          </div>
-          {{/if}}
-
-          <div class="dib-field">
-            <label>Skip Pattern
-              <span class="dib-hint">Rows / chunks matching this regex are ignored</span>
-            </label>
-            <input type="text" data-field="skipPattern"
-                   value="{{selectedRule.skipPattern}}"
-                   placeholder="e.g. ^\s*$ or ^-+$">
-          </div>
-        </fieldset>
-
-        {{!-- Font filter --}}
-        <fieldset class="dib-fieldset">
-          <legend>Font Filter <span class="dib-hint">(optional — leave blank to match all)</span></legend>
-          <div class="dib-form-row">
-            <div class="dib-field dib-field-grow">
-              <label>Font Name Contains</label>
-              <input type="text" data-field="fontFilter.name"
-                     value="{{selectedRule.fontFilter.name}}"
-                     placeholder="e.g. Bold, Italic, Times">
-            </div>
-            <div class="dib-field">
-              <label>Min Size</label>
-              <input type="number" data-field="fontFilter.minSize"
-                     value="{{selectedRule.fontFilter.minSize}}" min="0" placeholder="—">
-            </div>
-            <div class="dib-field">
-              <label>Max Size</label>
-              <input type="number" data-field="fontFilter.maxSize"
-                     value="{{selectedRule.fontFilter.maxSize}}" min="0" placeholder="—">
-            </div>
-          </div>
-        </fieldset>
-
-        {{!-- Attribute mappings --}}
-        <fieldset class="dib-fieldset">
-          <legend>
-            Attribute Mappings
-            <button type="button" data-action="addAttribute"
-                    class="dib-btn dib-btn-sm" style="float:right">
-              <i class="fas fa-plus"></i> Add Field
-            </button>
-          </legend>
-
-          <div class="attributes-list">
-            {{#each selectedRule.attributes}}
-            <div class="attr-row" data-attr-index="{{@index}}">
-              <div class="attr-row-header">
-                <span class="attr-label">
-                  {{#if this.foundryField}}
-                    <strong>{{this.foundryField}}</strong>
-                  {{else}}
-                    Attribute {{@index}}
-                  {{/if}}
-                </span>
-                <button type="button" data-action="deleteAttribute"
-                        class="dib-btn dib-btn-icon dib-btn-danger">
-                  <i class="fas fa-times"></i>
-                </button>
-              </div>
-
-              <div class="dib-form-row">
-                {{!-- Target Foundry field --}}
-                <div class="dib-field dib-field-grow">
-                  <label>Foundry Field</label>
-                  <select data-field="foundryField">
-                    <option value="">— select field —</option>
-                    {{#each ../attributePaths}}
-                    <option value="{{this.path}}"
-                            {{#if (eq this.path ../../foundryField)}}selected{{/if}}>
-                      {{this.path}}
-                    </option>
-                    {{/each}}
-                  </select>
-                </div>
-              </div>
-
-              <div class="dib-form-row">
-                {{!-- Column source (table mode) --}}
-                {{#if (eq ../selectedRule.contentType "table")}}
-                <div class="dib-field dib-field-grow">
-                  <label>Column Header
-                    <span class="dib-hint">Exact column heading text</span>
-                  </label>
-                  <input type="text" data-field="columnHeader"
-                         value="{{this.columnHeader}}"
-                         placeholder="e.g. Damage">
-                </div>
-                {{/if}}
-
-                {{!-- Optional refining regex --}}
-                <div class="dib-field dib-field-grow">
-                  <label>Refine Regex
-                    <span class="dib-hint">Optional — extract sub-match from cell text</span>
-                  </label>
-                  <input type="text" data-field="pattern"
-                         value="{{this.pattern}}"
-                         placeholder="e.g. (\d+d\d+)">
-                </div>
-                <div class="dib-field dib-field-narrow">
-                  <label>Group</label>
-                  <input type="number" data-field="group"
-                         value="{{this.group}}" min="0">
-                </div>
-                <div class="dib-field">
-                  <label>Transform</label>
-                  <select data-field="transform">
-                    {{#each ../transforms}}
-                    <option value="{{this.value}}"
-                            {{#if (eq this.value ../../transform)}}selected{{/if}}>
-                      {{this.label}}
-                    </option>
-                    {{/each}}
-                  </select>
-                </div>
-              </div>
-            </div>
-            {{else}}
-            <p class="attr-empty">
-              <i class="fas fa-info-circle"></i>
-              No attributes yet. Click <strong>Add Field</strong> to map PDF columns to item fields.
-            </p>
-            {{/each}}
-          </div>
-        </fieldset>
-
+      {{!-- Shared top bar: page range + item type (compact, no labels) --}}
+      <div class="dib-planner-topbar">
+        <input type="text" class="dib-topbar-input" data-field="pages"
+               value="{{selectedRule.pages}}"
+               placeholder="Pages: e.g. 1-25, 45, 50-60"
+               title="Pages to scan">
+        <select class="dib-topbar-select" data-field="itemType" title="Item Type">
+          <option value="">— Item Type —</option>
+          {{#each itemTypes}}
+          <option value="{{this.value}}"
+                  {{#if (eq this.value ../selectedRule.itemType)}}selected{{/if}}>
+            {{this.label}}
+          </option>
+          {{/each}}
+        </select>
       </div>
+
+      {{!-- Center tab bar --}}
+      <div class="dib-center-tab-bar">
+        <button class="dib-tab {{#if plannerTabActive}}active{{/if}}" data-center-tab="planner">
+          <i class="fas fa-drafting-compass"></i>
+          <span>PDF Planner</span>
+          {{#if tableRegionCount}}
+          <span class="dib-tab-badge">{{tableRegionCount}}T</span>
+          {{/if}}
+          {{#if textRegionCount}}
+          <span class="dib-tab-badge dib-tab-badge-text">{{textRegionCount}}X</span>
+          {{/if}}
+        </button>
+        <button class="dib-tab {{#if itemPlannerTabActive}}active{{/if}}" data-center-tab="item-planner">
+          <i class="fas fa-list-ul"></i>
+          <span>Item Planner</span>
+        </button>
+      </div>
+
+      {{!-- ── PDF PLANNER TAB ── --}}
+      <div class="dib-tab-panel {{#if plannerTabActive}}active{{/if}}" id="dib-center-planner">
+        {{#if hasPdf}}
+
+        {{!-- Planner toolbar --}}
+        <div class="dib-planner-toolbar">
+          <div class="dib-planner-page-nav">
+            <button class="dib-btn dib-btn-icon" data-planner-nav="prev"
+                    {{#if plannerAtFirst}}disabled{{/if}}>
+              <i class="fas fa-chevron-left"></i>
+            </button>
+            <span class="dib-planner-page-label">p.{{plannerPage}}</span>
+            <button class="dib-btn dib-btn-icon" data-planner-nav="next"
+                    {{#if plannerAtLast}}disabled{{/if}}>
+              <i class="fas fa-chevron-right"></i>
+            </button>
+          </div>
+
+          <div class="dib-planner-tools">
+            <button class="dib-btn dib-draw-btn {{#if (eq drawMode "table")}}active{{/if}}"
+                    data-draw-mode="table" title="Draw table region">
+              <i class="fas fa-table"></i> Table Region
+            </button>
+            <button class="dib-btn dib-draw-btn {{#if (eq drawMode "text")}}active{{/if}}"
+                    data-draw-mode="text" title="Draw text region">
+              <i class="fas fa-align-left"></i> Text Region
+            </button>
+          </div>
+
+          <button class="dib-btn" data-action="autoDetectRegions" title="Auto-detect tables">
+            <i class="fas fa-magic"></i> Auto-detect
+          </button>
+        </div>
+
+        {{!-- Planner content: canvas + sidebar --}}
+        <div class="dib-planner-content">
+
+          {{!-- Canvas area --}}
+          <div class="dib-planner-canvas-wrap {{#if drawMode}}draw-active{{/if}}">
+            <div class="dib-pdf-viewport">
+              <canvas id="dib-pdf-canvas"></canvas>
+              <div class="dib-region-overlay"></div>
+            </div>
+          </div>
+
+          {{!-- Region sidebar --}}
+          <div class="dib-region-sidebar">
+            <div class="dib-region-sidebar-header">
+              <i class="fas fa-vector-square"></i> Regions
+            </div>
+            {{#if selectedRule.regions.length}}
+              {{#each selectedRule.regions}}
+              <div class="dib-region-list-item dib-region-item-{{this.type}}"
+                   data-region-id="{{this.id}}">
+                <div class="dib-region-item-header">
+                  <span class="dib-region-type-badge">{{this.type}}</span>
+                  <input class="dib-region-label-input"
+                         type="text"
+                         value="{{this.label}}"
+                         data-region-field="label"
+                         data-region-id="{{this.id}}"
+                         placeholder="Label…">
+                </div>
+                <div class="dib-region-item-meta">
+                  <span class="dib-region-page-tag">p.{{this.page}}</span>
+                  <input class="dib-region-group-input"
+                         type="text"
+                         placeholder="group"
+                         value="{{this.group}}"
+                         data-region-field="group"
+                         data-region-id="{{this.id}}"
+                         title="Regions in the same group are collated together">
+                  <button class="dib-btn dib-btn-icon dib-btn-danger dib-region-del-btn"
+                          data-action="deleteRegion"
+                          data-region-id="{{this.id}}"
+                          title="Remove region">
+                    <i class="fas fa-times"></i>
+                  </button>
+                </div>
+              </div>
+              {{/each}}
+            {{else}}
+            <p class="dib-region-empty">
+              <i class="fas fa-draw-polygon"></i><br>
+              Click <strong>Table Region</strong> or <strong>Text Region</strong>,
+              then drag on the PDF to define extraction areas.
+            </p>
+            {{/if}}
+          </div>
+
+        </div>{{!-- /.dib-planner-content --}}
+
+        {{else}}
+        <div class="scan-empty">
+          <i class="fas fa-file-pdf fa-2x"></i>
+          <p>Load a PDF using the button above to start planning regions.</p>
+        </div>
+        {{/if}}
+      </div>{{!-- /#dib-center-planner --}}
+
+      {{!-- ── ITEM PLANNER TAB ── --}}
+      <div class="dib-tab-panel {{#if itemPlannerTabActive}}active{{/if}}" id="dib-center-item-planner">
+        <div class="rule-editor-inner">
+
+          {{!-- Rule name --}}
+          <fieldset class="dib-fieldset">
+            <legend>General</legend>
+            <div class="dib-form-row">
+              <div class="dib-field dib-field-grow">
+                <label>Rule Name</label>
+                <input type="text" data-field="name" value="{{selectedRule.name}}">
+              </div>
+              <div class="dib-field dib-field-grow">
+                <label>Content Type</label>
+                <select data-field="contentType">
+                  {{#each contentTypes}}
+                  <option value="{{this.value}}"
+                          {{#if (eq this.value ../selectedRule.contentType)}}selected{{/if}}>
+                    {{this.label}}
+                  </option>
+                  {{/each}}
+                </select>
+              </div>
+            </div>
+            <div class="dib-form-row">
+              <div class="dib-field dib-field-grow">
+                <label><i class="fas fa-folder"></i> Destination Folder</label>
+                <select data-field="folderId">
+                  <option value="">— No Folder (root) —</option>
+                  {{#each itemFolders}}
+                  <option value="{{this.id}}"
+                          {{#if (eq this.id ../selectedRule.folderId)}}selected{{/if}}>
+                    {{this.name}}
+                  </option>
+                  {{/each}}
+                </select>
+              </div>
+            </div>
+          </fieldset>
+
+          {{!-- Detection patterns --}}
+          <fieldset class="dib-fieldset">
+            <legend>Detection Patterns</legend>
+
+            {{#if (eq selectedRule.contentType "table")}}
+            <div class="dib-field">
+              <label>Header Row Pattern
+                <span class="dib-hint">Regex matching any text in the column header row</span>
+              </label>
+              <input type="text" data-field="headerPattern"
+                     value="{{selectedRule.headerPattern}}"
+                     placeholder="e.g. Weapon|Name|Item">
+            </div>
+            {{/if}}
+
+            {{#if (eq selectedRule.contentType "column")}}
+            <div class="dib-field">
+              <label>Item Start Pattern
+                <span class="dib-hint">Regex marking the beginning of each item in prose text</span>
+              </label>
+              <input type="text" data-field="rowDetectionPattern"
+                     value="{{selectedRule.rowDetectionPattern}}"
+                     placeholder="e.g. ^[A-Z][a-z]+ [\w]+ \(">
+            </div>
+            {{/if}}
+
+            {{#if (eq selectedRule.contentType "mixed")}}
+            <div class="dib-field">
+              <label>Item Start Pattern
+                <span class="dib-hint">For prose side of mixed layout</span>
+              </label>
+              <input type="text" data-field="rowDetectionPattern"
+                     value="{{selectedRule.rowDetectionPattern}}"
+                     placeholder="Regex to detect item start in prose column">
+            </div>
+            <div class="dib-field">
+              <label>Description Target Field
+                <span class="dib-hint">e.g. system.description</span>
+              </label>
+              <input type="text" data-field="descriptionField"
+                     value="{{selectedRule.descriptionField}}"
+                     placeholder="system.description">
+            </div>
+            {{/if}}
+
+            <div class="dib-field">
+              <label>Skip Pattern
+                <span class="dib-hint">Rows matching this regex are ignored</span>
+              </label>
+              <input type="text" data-field="skipPattern"
+                     value="{{selectedRule.skipPattern}}"
+                     placeholder="e.g. ^\s*$ or ^-+$">
+            </div>
+          </fieldset>
+
+          {{!-- Font filter --}}
+          <fieldset class="dib-fieldset">
+            <legend>Font Filter <span class="dib-hint">(optional)</span></legend>
+            <div class="dib-form-row">
+              <div class="dib-field dib-field-grow">
+                <label>Font Name Contains</label>
+                <input type="text" data-field="fontFilter.name"
+                       value="{{selectedRule.fontFilter.name}}"
+                       placeholder="e.g. Bold, Italic, Times">
+              </div>
+              <div class="dib-field">
+                <label>Min Size</label>
+                <input type="number" data-field="fontFilter.minSize"
+                       value="{{selectedRule.fontFilter.minSize}}" min="0" placeholder="—">
+              </div>
+              <div class="dib-field">
+                <label>Max Size</label>
+                <input type="number" data-field="fontFilter.maxSize"
+                       value="{{selectedRule.fontFilter.maxSize}}" min="0" placeholder="—">
+              </div>
+            </div>
+          </fieldset>
+
+          {{!-- Attribute mappings --}}
+          <fieldset class="dib-fieldset">
+            <legend>
+              Attribute Mappings
+              <button type="button" data-action="addAttribute"
+                      class="dib-btn dib-btn-sm" style="float:right">
+                <i class="fas fa-plus"></i> Add Field
+              </button>
+            </legend>
+
+            <div class="attributes-list">
+              {{#each selectedRule.attributes}}
+              <div class="attr-row" data-attr-index="{{@index}}">
+                <div class="attr-row-header">
+                  <span class="attr-label">
+                    {{#if this.foundryField}}
+                      <strong>{{this.foundryField}}</strong>
+                    {{else}}
+                      Attribute {{@index}}
+                    {{/if}}
+                  </span>
+                  <button type="button" data-action="deleteAttribute"
+                          class="dib-btn dib-btn-icon dib-btn-danger">
+                    <i class="fas fa-times"></i>
+                  </button>
+                </div>
+
+                <div class="dib-form-row">
+                  <div class="dib-field dib-field-grow">
+                    <label>Foundry Field</label>
+                    <select data-field="foundryField">
+                      <option value="">— select field —</option>
+                      {{#each ../attributePaths}}
+                      <option value="{{this.path}}"
+                              {{#if (eq this.path ../foundryField)}}selected{{/if}}>
+                        {{this.path}}
+                      </option>
+                      {{/each}}
+                    </select>
+                  </div>
+                </div>
+
+                <div class="dib-form-row">
+                  {{#if (eq ../selectedRule.contentType "table")}}
+                  <div class="dib-field dib-field-grow">
+                    <label>Column Header
+                      <span class="dib-hint">Exact column heading text</span>
+                    </label>
+                    <input type="text" data-field="columnHeader"
+                           value="{{this.columnHeader}}"
+                           placeholder="e.g. Damage">
+                  </div>
+                  {{/if}}
+
+                  <div class="dib-field dib-field-grow">
+                    <label>Refine Regex
+                      <span class="dib-hint">Optional — extract sub-match from cell text</span>
+                    </label>
+                    <input type="text" data-field="pattern"
+                           value="{{this.pattern}}"
+                           placeholder="e.g. (\d+d\d+)">
+                  </div>
+                  <div class="dib-field dib-field-narrow">
+                    <label>Group</label>
+                    <input type="number" data-field="group"
+                           value="{{this.group}}" min="0">
+                  </div>
+                  <div class="dib-field">
+                    <label>Transform</label>
+                    <select data-field="transform">
+                      {{#each ../transforms}}
+                      <option value="{{this.value}}"
+                              {{#if (eq this.value ../transform)}}selected{{/if}}>
+                        {{this.label}}
+                      </option>
+                      {{/each}}
+                    </select>
+                  </div>
+                </div>
+              </div>
+              {{else}}
+              <p class="attr-empty">
+                <i class="fas fa-info-circle"></i>
+                No attributes yet. Click <strong>Add Field</strong> to map PDF columns to item fields.
+              </p>
+              {{/each}}
+            </div>
+          </fieldset>
+
+        </div>{{!-- /.rule-editor-inner --}}
+      </div>{{!-- /#dib-center-item-planner --}}
+
       {{else}}
+      {{!-- No rule selected --}}
       <div class="dib-no-selection">
         <i class="fas fa-arrow-left fa-2x"></i>
         <p>Select a rule from the list, or create a new one with <strong>+</strong>.</p>
       </div>
       {{/if}}
+
     </section>
 
     {{!-- ──────────────────────────
-         RIGHT: Scan + Preview (tabs)
+         RIGHT: Preview Section
+         Tab 1: Table Preview
+         Tab 2: Text Preview
+         Tab 3: Item Preview
     ────────────────────────── --}}
     <aside class="dib-panel dib-panel-preview">
 
@@ -341,7 +461,7 @@
       <div class="dib-tab-bar">
         <button class="dib-tab {{#if tablesTabActive}}active{{/if}}" data-tab="tables">
           <i class="fas fa-table"></i>
-          <span>PDF: Tables</span>
+          <span>Table Preview</span>
           {{#if scanData}}
           <span class="dib-tab-badge">{{scanData.tables.length}} tbl</span>
           {{/if}}
@@ -351,7 +471,7 @@
         </button>
         <button class="dib-tab {{#if textTabActive}}active{{/if}}" data-tab="text">
           <i class="fas fa-align-left"></i>
-          <span>PDF: Text</span>
+          <span>Text Preview</span>
           {{#if textData}}
           <span class="dib-tab-badge">{{textData.sections.length}} sec</span>
           {{/if}}
@@ -369,17 +489,18 @@
         </button>
       </div>
 
-      {{!-- ── PDF TABLES panel ── --}}
+      {{!-- ── TABLE PREVIEW ── --}}
       <div class="dib-tab-panel {{#if tablesTabActive}}active{{/if}}" id="dib-tab-tables">
         <div class="dib-scan-content">
           {{#if scanData}}
 
-            {{!-- Detected tables --}}
             {{#each scanData.tables}}
             <div class="scan-table-wrap">
               <div class="scan-table-label">
                 <i class="fas fa-table"></i> Table {{@index}}
-                <span class="scan-col-count">{{this.columns.length}} columns · {{this.rows.length}} rows</span>
+                <span class="scan-col-count">
+                  {{this.columns.length}} columns · {{this.rows.length}} rows
+                </span>
               </div>
               <div class="scan-table-scroll">
                 <table class="scan-table">
@@ -390,7 +511,7 @@
                           data-scan="header-cell"
                           data-column="{{this.header}}"
                           title="Click to map or set header pattern">
-                        {{this.header}}
+                        {{#if this.header}}{{this.header}}{{else}}<em class="dib-unlabeled">(unlabeled)</em>{{/if}}
                       </th>
                       {{/each}}
                     </tr>
@@ -415,7 +536,6 @@
             </div>
             {{/each}}
 
-            {{!-- Prose / non-table rows --}}
             {{#if scanData.proseRows.length}}
             <div class="scan-prose-section">
               <div class="scan-prose-label"><i class="fas fa-align-left"></i> Other Text</div>
@@ -433,13 +553,13 @@
           {{else}}
           <div class="scan-empty">
             <i class="fas fa-file-pdf"></i>
-            <p>Select a rule with a page range and click <strong>Refresh</strong> to scan the PDF.</p>
+            <p>Draw table regions in the <strong>PDF Planner</strong>, then click <strong>Refresh</strong>.</p>
           </div>
           {{/if}}
         </div>
       </div>
 
-      {{!-- ── PDF TEXT panel ── --}}
+      {{!-- ── TEXT PREVIEW ── --}}
       <div class="dib-tab-panel {{#if textTabActive}}active{{/if}}" id="dib-tab-text">
         <div class="text-scan-content">
           {{#if textData.sections.length}}
@@ -472,16 +592,15 @@
           {{else}}
           <div class="scan-empty">
             <i class="fas fa-align-left"></i>
-            <p>Select a rule with a page range and click <strong>Refresh</strong> to scan text.</p>
+            <p>Draw text regions in the <strong>PDF Planner</strong>, then click <strong>Refresh</strong>.</p>
           </div>
           {{/if}}
         </div>
       </div>
 
-      {{!-- ── ITEMS PREVIEW panel ── --}}
+      {{!-- ── ITEMS PREVIEW ── --}}
       <div class="dib-tab-panel {{#if previewTabActive}}active{{/if}}" id="dib-tab-preview">
 
-        {{!-- Toolbar --}}
         <div class="dib-preview-toolbar">
           <button class="dib-btn-sm" data-action="preview-select-all">Select All</button>
           <button class="dib-btn-sm" data-action="preview-deselect-all">Deselect All</button>
@@ -492,7 +611,6 @@
           {{#if previewSummary.length}}
             {{#each previewSummary}}
             <div class="preview-rule" data-rule-id="{{this.id}}">
-
               <div class="preview-rule-header">
                 <span class="preview-rule-name">{{this.name}}</span>
                 {{#if this.items}}
@@ -543,7 +661,6 @@
           {{/if}}
         </div>
 
-        {{!-- Ignore List --}}
         {{#if hasIgnoredItems}}
         <div class="dib-ignore-section">
           <div class="dib-ignore-toolbar">
@@ -595,7 +712,7 @@
         </div>
         {{/if}}
 
-      </div>
+      </div>{{!-- /#dib-tab-preview --}}
 
     </aside>
 
