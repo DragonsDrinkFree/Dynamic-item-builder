@@ -167,7 +167,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       const flatItems   = rawItems
         ? rawItems
             .map((item, idx) => {
-              const dibKey = item.name ?? `_${idx}`;
+              const dibKey = `_${idx}`;
               const flat   = foundry.utils.flattenObject(item);
               flat._dibKey = dibKey;
               flat._key    = `${r.id}::${dibKey}`;
@@ -763,7 +763,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       rule.ignoredItems ??= [];
       if (rule.ignoredItems.some(i => i._dibKey === dibKey)) continue;
       const raw = this._preview[ruleId]
-        ?.find((item, idx) => (item.name ?? `_${idx}`) === dibKey);
+        ?.find((_item, idx) => `_${idx}` === dibKey);
       if (raw) rule.ignoredItems.push({ ...foundry.utils.deepClone(raw), _dibKey: dibKey });
       else     rule.ignoredItems.push({ _dibKey: dibKey, name: dibKey });
     }
@@ -1027,9 +1027,10 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     if (col && this._cachedAttributePaths.length) {
       menuItems.push({ separator: true });
       menuItems.push({ heading: `Map column "${col}" to field:` });
+      menuItems.push({ filterInput: true });
       for (const attr of this._cachedAttributePaths) {
         menuItems.push({
-          icon: 'fa-link', label: attr.path,
+          icon: 'fa-link', label: attr.path, filterable: true,
           action: () => { this.#mapColumnToField(rule, col, attr.path); this.render(); }
         });
       }
@@ -1189,7 +1190,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
           const items       = this._preview[ruleId] ?? [];
           let changed = 0;
           items.forEach((item, idx) => {
-            const dibKey = item.name ?? `_${idx}`;
+            const dibKey = `_${idx}`;
             if (ignoredKeys.has(dibKey)) return;
             const flat   = foundry.utils.flattenObject(item);
             const cur    = this._cellOverrides[ruleId]?.[dibKey]?.[field] !== undefined
@@ -1335,14 +1336,65 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     const menu = document.createElement('div');
     menu.className = 'dib-context-menu';
 
+    let filterableList = null;
+    let filterInput    = null;
+
     for (const item of items) {
-      if (item.separator) { const hr = document.createElement('hr'); hr.className = 'dib-ctx-sep'; menu.appendChild(hr); continue; }
-      if (item.heading)   { const h  = document.createElement('div'); h.className = 'dib-ctx-heading'; h.textContent = item.heading; menu.appendChild(h); continue; }
+      if (item.separator) {
+        const hr = document.createElement('hr');
+        hr.className = 'dib-ctx-sep';
+        menu.appendChild(hr);
+        continue;
+      }
+      if (item.heading) {
+        const h = document.createElement('div');
+        h.className = 'dib-ctx-heading';
+        h.textContent = item.heading;
+        menu.appendChild(h);
+        continue;
+      }
+      if (item.filterInput) {
+        filterInput = document.createElement('input');
+        filterInput.type = 'text';
+        filterInput.className = 'dib-ctx-filter';
+        filterInput.placeholder = 'Filter fields…';
+
+        filterableList = document.createElement('div');
+        filterableList.className = 'dib-ctx-filterable-list';
+
+        filterInput.addEventListener('input', () => {
+          const q = filterInput.value.toLowerCase();
+          filterableList.querySelectorAll('.dib-ctx-item').forEach(btn => {
+            btn.hidden = !!q && !btn.textContent.toLowerCase().includes(q);
+          });
+        });
+        filterInput.addEventListener('keydown', e => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            filterableList.querySelector('.dib-ctx-item:not([hidden])')?.click();
+          }
+          if (e.key === 'Escape') { e.stopPropagation(); menu.remove(); }
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            filterableList.querySelector('.dib-ctx-item:not([hidden])')?.focus();
+          }
+        });
+
+        menu.appendChild(filterInput);
+        menu.appendChild(filterableList);
+        continue;
+      }
+
       const btn = document.createElement('button');
       btn.className = 'dib-ctx-item';
       btn.innerHTML = `<i class="fas ${item.icon ?? 'fa-circle'}"></i> ${item.label}`;
       btn.addEventListener('click', () => { item.action(); menu.remove(); });
-      menu.appendChild(btn);
+
+      if (item.filterable && filterableList) {
+        filterableList.appendChild(btn);
+      } else {
+        menu.appendChild(btn);
+      }
     }
 
     document.body.appendChild(menu);
@@ -1350,6 +1402,8 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     const { offsetWidth: w, offsetHeight: h } = menu;
     menu.style.left = `${Math.min(x, window.innerWidth  - w - 8)}px`;
     menu.style.top  = `${Math.min(y, window.innerHeight - h - 8)}px`;
+
+    if (filterInput) filterInput.focus();
 
     const close = e => {
       if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('pointerdown', close, true); }
@@ -1522,7 +1576,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         const ignoredKeys = new Set((rule.ignoredItems ?? []).map(i => i._dibKey));
 
         for (const [idx, parsed] of rawItems.entries()) {
-          const dibKey = parsed.name ?? `_${idx}`;
+          const dibKey = `_${idx}`;
           if (ignoredKeys.has(dibKey)) continue;
 
           // Apply overrides so test reflects the same data that would be built
@@ -1747,8 +1801,23 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
     let total = 0;
     for (const rule of this._rules) {
-      const items = this._preview[rule.id];
-      if (!items?.length || !rule.itemType) continue;
+      const rawItems = this._preview[rule.id];
+      if (!rawItems?.length || !rule.itemType) continue;
+
+      // Apply ignored-item filter and cell overrides — same logic as _prepareContext
+      const ignoredKeys = new Set((rule.ignoredItems ?? []).map(i => i._dibKey));
+      const items = rawItems
+        .map((item, idx) => {
+          const dibKey = `_${idx}`;
+          if (ignoredKeys.has(dibKey)) return null;
+          const effective = { ...item };
+          const ovr = this._cellOverrides[rule.id]?.[dibKey] ?? {};
+          for (const [f, v] of Object.entries(ovr)) effective[f] = v;
+          return effective;
+        })
+        .filter(Boolean);
+
+      if (!items.length) continue;
       const folderId = rule.folderId || this._selectedFolderId;
       const folder   = folderId ? game.folders.get(folderId) ?? null : null;
       try {

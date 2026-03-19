@@ -777,6 +777,29 @@
   letter-spacing: 0.07em;
   color: #c49a3c;
 }
+.dib-ctx-filter {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 4px 8px 2px;
+  padding: 4px 8px;
+  background: #1a1a22;
+  border: 1px solid #424248;
+  border-radius: 4px;
+  color: #d4d4d8;
+  font-size: 12px;
+  outline: none;
+  box-sizing: border-box;
+}
+.dib-ctx-filter:focus {
+  border-color: var(--dib-accent);
+}
+.dib-ctx-filterable-list {
+  max-height: 220px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.dib-ctx-filterable-list::-webkit-scrollbar { width: 4px; }
+.dib-ctx-filterable-list::-webkit-scrollbar-thumb { background: #424248; border-radius: 2px; }
 
 
 /* ──────────────────────────────────────
