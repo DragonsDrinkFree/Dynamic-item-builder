@@ -8,7 +8,7 @@
 
 import {
   loadPDF, extractPages, parsePageString, mergePageItems,
-  detectTables, detectTextSections, renderPageToCanvas
+  detectTables, renderPageToCanvas
 } from '../pdf-parser.js';
 import { applyRule }   from '../rule-engine.js';
 import { buildItems }  from '../item-builder.js';
@@ -40,7 +40,11 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       exportRules:         DynamicItemBuilderApp.#exportRules,
       importRules:         DynamicItemBuilderApp.#importRules,
       loadPdf:             DynamicItemBuilderApp.#loadPdfDialog,
-      refreshPreview:      DynamicItemBuilderApp.#refreshPreview
+      refreshPreview:      DynamicItemBuilderApp.#refreshPreview,
+      openAttributeMenu:   DynamicItemBuilderApp.#openAttributeMenu,
+      acceptSuggestion:    DynamicItemBuilderApp.#acceptSuggestion,
+      linkAllSuggestions:  DynamicItemBuilderApp.#linkAllSuggestions,
+      testRun:             DynamicItemBuilderApp.#testRun
     }
   };
 
@@ -71,18 +75,18 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
   _previewLoading = false;
 
+  /** @type {string|null} Global default destination folder for all rules */
+  _selectedFolderId = null;
+
   /** @type {Object|null} detectTables() result for current rule */
   _scanData = null;
-
-  /** @type {Object|null} detectTextSections() result for current rule */
-  _textData = null;
 
   // ── Tab state ──────────────────────────────────────────────────────────────
 
   /** @type {'planner'|'item-planner'} */
   _centerTab = 'planner';
 
-  /** @type {'tables'|'text'|'preview'} */
+  /** @type {'tables'|'preview'} */
   _rightTab = 'tables';
 
   // ── PDF Planner state ──────────────────────────────────────────────────────
@@ -113,6 +117,19 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
   _lastPreviewClickKey = null;
   _lastIgnoreClickKey  = null;
 
+  /** @type {Object} Keyed [ruleId][dibKey][field] — value overrides for preview cells */
+  _cellOverrides = {};
+
+  /** @type {Object} Keyed [ruleId][dibKey][field|'_row'] — test-run validation errors */
+  _testErrors = {};
+
+  /** @type {Array<{ruleId,dibKey,field}>} Currently highlighted column cells */
+  _cellSel       = [];
+  _cellSelField  = null;
+  _cellSelRuleId = null;
+  _lastCellKey   = null;
+  _wasCellDrag   = false;
+
   /** @type {Array<{path,label}>} */
   _cachedAttributePaths = [];
 
@@ -137,6 +154,13 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       const cols = r.attributes
         .filter(a => a.foundryField)
         .map(a => ({ field: a.foundryField, label: a.foundryField.split('.').pop() }));
+      // Append manual (unlinked) columns chosen by the user
+      const linkedFields = new Set(cols.map(c => c.field));
+      for (const path of (r.manualColumns ?? [])) {
+        if (!linkedFields.has(path)) {
+          cols.push({ field: path, label: path.split('.').pop(), manual: true });
+        }
+      }
 
       const ignoredKeys = new Set((r.ignoredItems ?? []).map(i => i._dibKey));
       const rawItems    = this._preview[r.id] ?? null;
@@ -147,6 +171,9 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
               const flat   = foundry.utils.flattenObject(item);
               flat._dibKey = dibKey;
               flat._key    = `${r.id}::${dibKey}`;
+              // Apply any per-cell value overrides
+              const ovr = this._cellOverrides[r.id]?.[dibKey] ?? {};
+              for (const [ovField, ovVal] of Object.entries(ovr)) flat[ovField] = ovVal;
               return flat;
             })
             .filter(item => !ignoredKeys.has(item._dibKey))
@@ -171,6 +198,49 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       .sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0))
       .map(f => ({ id: f.id, name: '\u00a0'.repeat((f.depth ?? 0) * 2) + f.name }));
 
+    // Guard: removed tabs — fall back to tables
+    if (this._rightTab === 'suggested' || this._rightTab === 'text') this._rightTab = 'tables';
+
+    // Attribute link suggestions — computed from detected columns vs available paths
+    const suggestions = rule && attributePaths.length && this._scanData
+      ? computeSuggestionsForRule(rule, this._scanData, attributePaths)
+      : [];
+
+    // Flat attribute list for the new mapping UI (all system fields + orphan mappings)
+    const seenPaths   = new Set();
+    const attributeList = attributePaths.map(attr => {
+      seenPaths.add(attr.path);
+      const mapping    = rule?.attributes.find(a => a.foundryField === attr.path && a.columnHeader);
+      const suggestion = suggestions.find(s => s.suggestedField === attr.path);
+      const inPreview  = !mapping && (rule?.manualColumns ?? []).includes(attr.path);
+      return {
+        path:                attr.path,
+        shortLabel:          attr.path.split('.').pop(),
+        linked:              !!mapping,
+        columnHeader:        mapping?.columnHeader ?? '',
+        transform:           mapping?.transform ?? 'trim',
+        suggested:           !mapping && !!suggestion,
+        suggestedColumn:     suggestion?.columnHeader ?? '',
+        suggestedScoreClass: suggestion?.scoreClass ?? '',
+        suggestedScoreLabel: suggestion?.scoreLabel ?? '',
+        status:              mapping ? 'linked' : (suggestion ? 'suggested' : 'none'),
+        inPreview
+      };
+    });
+    // Append any custom mappings pointing to paths not in the standard list
+    for (const attr of (rule?.attributes ?? [])) {
+      if (attr.foundryField && !seenPaths.has(attr.foundryField) && attr.columnHeader) {
+        attributeList.push({
+          path: attr.foundryField, shortLabel: attr.foundryField.split('.').pop(),
+          linked: true, columnHeader: attr.columnHeader, transform: attr.transform ?? 'trim',
+          suggested: false, suggestedColumn: '', suggestedScoreClass: '', suggestedScoreLabel: '',
+          status: 'linked', inPreview: false
+        });
+      }
+    }
+    attributeList.sort((a, b) => ({ linked: 0, suggested: 1, none: 2 }[a.status] ?? 2) - ({ linked: 0, suggested: 1, none: 2 }[b.status] ?? 2));
+    const suggestionCount = attributeList.filter(a => a.suggested).length;
+
     return {
       hasPdf:    !!this._pdf,
       pdfName:   this._pdfName,
@@ -183,11 +253,10 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       previewSummary,
       hasIgnoredItems,
       previewLoading:  this._previewLoading,
-      contentTypes:    CONTENT_TYPES,
       transforms:      TRANSFORMS,
       itemFolders,
-      scanData:  this._scanData,
-      textData:  this._textData,
+      selectedFolderId: this._selectedFolderId,
+      scanData:  enrichScanDataColumns(this._scanData, rule, suggestions),
       // Center panel tabs
       plannerTabActive:     this._centerTab === 'planner',
       itemPlannerTabActive: this._centerTab === 'item-planner',
@@ -195,11 +264,13 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       drawMode:    this._drawMode,
       // Right panel tabs
       tablesTabActive:  this._rightTab === 'tables',
-      textTabActive:    this._rightTab === 'text',
       previewTabActive: this._rightTab === 'preview',
       // Region counts for badges
       tableRegionCount: (rule?.regions ?? []).filter(r => r.type === 'table').length,
-      textRegionCount:  (rule?.regions ?? []).filter(r => r.type === 'text').length,
+      // Attribute mapping list
+      attributeList,
+      suggestionCount,
+      previewHasContent: previewSummary.some(r => (r.items ?? []).length > 0),
       // Planner page navigation — restrict to pages defined in rule
       plannerAtFirst: !this.#plannerPages().length || this._plannerPage <= this.#plannerPages()[0],
       plannerAtLast:  !this.#plannerPages().length || this._plannerPage >= this.#plannerPages()[this.#plannerPages().length - 1]
@@ -218,6 +289,10 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     this.#updateIgnoreToolbar(this.element);
     // Render planner canvas async (no await — fires and updates DOM independently)
     this.#renderPlannerCanvas();
+    // Mark overridden, multi-selected, and errored preview cells
+    this.#applyOverrideClasses();
+    this.#applyCellSelClasses();
+    this.#applyTestErrorClasses();
   }
 
   // -------------------------------------------------------------------------
@@ -231,6 +306,11 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     el.querySelector('#dib-pdf-input')?.addEventListener('change', e => {
       const file = e.target.files?.[0];
       if (file) this.#handlePdfFile(file);
+    });
+
+    // Global folder picker
+    el.querySelector('#dib-folder-select')?.addEventListener('change', e => {
+      this._selectedFolderId = e.target.value || null;
     });
 
     // Center panel tab bar
@@ -309,11 +389,6 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       this.#handleScanClick(e);
     });
 
-    // Text entry clicks (Text Preview)
-    el.querySelector('.text-scan-content')?.addEventListener('click', e => {
-      this.#handleTextEntryClick(e);
-    });
-
     // Preview toolbar
     el.querySelector('.dib-preview-toolbar')?.addEventListener('click', e => {
       const btn = e.target.closest('[data-action]');
@@ -336,15 +411,99 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       }
     });
 
-    // Row selection
+    // Row selection — only triggered from the dedicated selection column cell
     this.#bindListSelection(
       el.querySelector('.preview-list'), this._previewSel,
-      '_lastPreviewClickKey', () => this.#updatePreviewToolbar(this.element)
+      '_lastPreviewClickKey', () => this.#updatePreviewToolbar(this.element),
+      '.dib-sel-cell'
     );
     this.#bindListSelection(
       el.querySelector('.ignore-list'), this._ignoreSel,
-      '_lastIgnoreClickKey', () => this.#updateIgnoreToolbar(this.element)
+      '_lastIgnoreClickKey', () => this.#updateIgnoreToolbar(this.element),
+      '.dib-sel-cell'
     );
+
+    // Column-cell drag selection (mousedown to support drag-range)
+    const previewList = el.querySelector('.preview-list');
+    previewList?.addEventListener('mousedown', e => {
+      if (e.button !== 0) return;
+      const td = e.target.closest('.preview-td');
+      if (!td) return;
+      e.preventDefault();
+
+      const ruleEl  = td.closest('[data-rule-id]');
+      const rowEl   = td.closest('[data-item-key]');
+      const ruleId  = ruleEl?.dataset.ruleId;
+      const itemKey = rowEl?.dataset.itemKey;
+      const field   = td.dataset.field;
+      if (!ruleId || !itemKey || !field) return;
+      const dibKey = itemKey.substring(ruleId.length + 2);
+
+      if (e.shiftKey && this._lastCellKey
+          && this._cellSelField === field && this._cellSelRuleId === ruleId) {
+        this.#cellRangeSelect(ruleId, field, this._lastCellKey, dibKey);
+      } else if (e.ctrlKey || e.metaKey) {
+        if (this._cellSelField !== field || this._cellSelRuleId !== ruleId) {
+          this._cellSel = [];
+          this._cellSelField = field;
+          this._cellSelRuleId = ruleId;
+        }
+        const idx = this._cellSel.findIndex(c => c.dibKey === dibKey);
+        if (idx >= 0) this._cellSel.splice(idx, 1);
+        else this._cellSel.push({ ruleId, dibKey, field });
+        this._lastCellKey = dibKey;
+      } else {
+        const alreadyInMulti = this._cellSel.length > 1
+          && this.#isCellSelected(ruleId, dibKey, field)
+          && this._cellSelField === field && this._cellSelRuleId === ruleId;
+
+        if (!alreadyInMulti) {
+          this._cellSel      = [{ ruleId, dibKey, field }];
+          this._cellSelField = field;
+          this._cellSelRuleId = ruleId;
+          this._lastCellKey  = dibKey;
+
+          // Drag to extend range within same column
+          this._wasCellDrag = false;
+          const startDibKey = dibKey;
+          const onMove = ev => {
+            const overTd = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.preview-td');
+            if (!overTd || overTd.dataset.field !== field) return;
+            const overRuleEl = overTd.closest('[data-rule-id]');
+            if (overRuleEl?.dataset.ruleId !== ruleId) return;
+            const overKey = overTd.closest('[data-item-key]')?.dataset.itemKey?.substring(ruleId.length + 2);
+            if (!overKey) return;
+            this.#cellRangeSelect(ruleId, field, startDibKey, overKey);
+            this._wasCellDrag = true;
+            this.#applyCellSelClasses();
+          };
+          document.addEventListener('mousemove', onMove);
+          document.addEventListener('mouseup', () => {
+            document.removeEventListener('mousemove', onMove);
+            this.#applyCellSelClasses();
+          }, { once: true });
+        }
+      }
+      this.#applyCellSelClasses();
+    });
+
+    // Column header menu + per-cell context menu in Item Preview
+    previewList?.addEventListener('click', e => {
+      // Always eat the click that follows a drag regardless of where mouse was released
+      if (this._wasCellDrag) { this._wasCellDrag = false; return; }
+      const th = e.target.closest('.preview-th');
+      if (th) { this.#showColumnMenu(e, th); return; }
+      const td = e.target.closest('.preview-td');
+      if (td) {
+        this.#showCellMenu(e, td);
+        return;
+      }
+      // Clicked outside any cell — clear column selection
+      if (this._cellSel.length > 0) {
+        this._cellSel = []; this._cellSelField = null; this._cellSelRuleId = null;
+        this.#applyCellSelClasses();
+      }
+    });
   }
 
   /** Returns the sorted list of page numbers valid for the current rule. */
@@ -511,10 +670,14 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
   // Preview / Ignore selection
   // -------------------------------------------------------------------------
 
-  #bindListSelection(listEl, selSet, lastKeyProp, onUpdate) {
+  #bindListSelection(listEl, selSet, lastKeyProp, onUpdate, triggerSelector = null) {
     if (!listEl) return;
     listEl.addEventListener('mousedown', e => {
-      const row = e.target.closest('[data-item-key]');
+      const origin = triggerSelector
+        ? e.target.closest(triggerSelector)
+        : e.target.closest('[data-item-key]');
+      if (!origin) return;
+      const row = origin.closest('[data-item-key]');
       if (!row) return;
       e.preventDefault();
 
@@ -702,6 +865,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
   async #runPreview() {
     if (!this._pdf) return;
+    this._testErrors = {};   // stale test results no longer valid after a re-scan
     this._previewLoading = true;
     this.render();
     await this.#runScan();
@@ -731,7 +895,6 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     const rule = this.selectedRule;
     if (!this._pdf || !rule?.pages) {
       this._scanData = null;
-      this._textData = null;
       return;
     }
 
@@ -739,22 +902,23 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       const pageNums     = parsePageString(rule.pages, this._pdf.numPages);
       const pages        = await extractPages(this._pdf, pageNums);
       const tableRegions = (rule.regions ?? []).filter(r => r.type === 'table');
-      const textRegions  = (rule.regions ?? []).filter(r => r.type === 'text');
 
-      if (tableRegions.length > 0 || textRegions.length > 0) {
-        // Region-based: extract only items inside defined rectangles
+      if (tableRegions.length > 0) {
         this._scanData = this.#scanTableRegions(pages, tableRegions);
-        this._textData = this.#scanTextRegions(pages, textRegions);
       } else {
         // Auto-detect fallback
-        const allItems     = mergePageItems(pages);
-        this._scanData     = detectTables(allItems);
-        this._textData     = detectTextSections(allItems);
+        const allItems = mergePageItems(pages);
+        this._scanData = detectTables(allItems);
       }
     } catch (err) {
       console.warn('Dynamic Item Builder | Scan error:', err);
       this._scanData = null;
-      this._textData = null;
+    }
+
+    // Auto-populate headerPattern from the first labeled column if not already set
+    if (rule && !rule.headerPattern?.trim() && this._scanData?.tables?.[0]?.columns?.length) {
+      const firstHeader = this._scanData.tables[0].columns.find(c => c.header)?.header;
+      if (firstHeader) rule.headerPattern = firstHeader;
     }
   }
 
@@ -810,44 +974,8 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     return { tables, proseRows };
   }
 
-  /** Extract and collate text regions. */
-  #scanTextRegions(pages, regions) {
-    if (!regions.length) return { sections: [] };
-
-    const groups = new Map();
-    for (const region of [...regions].sort((a, b) => a.page - b.page || a.y - b.y)) {
-      if (!groups.has(region.group)) groups.set(region.group, []);
-      groups.get(region.group).push(region);
-    }
-
-    const sections = [];
-
-    for (const [, groupRegions] of groups) {
-      let yOffset    = 0;
-      const groupItems = [];
-
-      for (const region of groupRegions) {
-        const page = pages.find(p => p.pageNum === region.page);
-        if (!page) continue;
-        const regionItems = this.#filterItemsToRegion(page, region);
-        for (const item of regionItems) {
-          groupItems.push({ ...item, y: item.y + yOffset });
-        }
-        if (regionItems.length) {
-          yOffset += Math.max(...regionItems.map(i => i.y)) + 50;
-        }
-      }
-
-      if (!groupItems.length) continue;
-      const result = detectTextSections(groupItems);
-      sections.push(...result.sections);
-    }
-
-    return { sections };
-  }
-
   // -------------------------------------------------------------------------
-  // Scan / Text context menus
+  // Scan context menus
   // -------------------------------------------------------------------------
 
   #handleScanClick(event) {
@@ -909,42 +1037,6 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     this.#showContextMenu(event, menuItems);
   }
 
-  #handleTextEntryClick(event) {
-    const rule  = this.selectedRule;
-    const entry = event.target.closest('[data-scan="text-entry"]');
-    if (!rule || !entry) return;
-    event.stopPropagation();
-
-    const name = entry.dataset.name ?? '';
-    const desc = entry.dataset.description ?? '';
-    const menuItems = [];
-
-    if (name) {
-      menuItems.push({
-        icon: 'fa-flag',
-        label: `Set Item Start Pattern: "${name.slice(0, 35)}"`,
-        action: () => {
-          rule.rowDetectionPattern = _esc(name.split(/[\s,]/)[0]);
-          this.#schedulePreview(); this.render();
-        }
-      });
-      if (this._cachedAttributePaths.length) {
-        menuItems.push({ separator: true });
-        menuItems.push({ heading: `Map name to field:` });
-        for (const attr of this._cachedAttributePaths) {
-          menuItems.push({
-            icon: 'fa-link', label: attr.path,
-            action: () => {
-              rule.attributes.push({ ...makeDefaultAttribute(), pattern: _esc(name), foundryField: attr.path });
-              this.#schedulePreview(); this.render();
-            }
-          });
-        }
-      }
-    }
-    this.#showContextMenu(event, menuItems);
-  }
-
   #mapColumnToField(rule, columnHeader, foundryField) {
     const duplicate = rule.attributes.find(
       a => a.columnHeader === columnHeader && a.foundryField === foundryField
@@ -953,6 +1045,287 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       rule.attributes.push({ ...makeDefaultAttribute(), columnHeader, foundryField });
     }
     this.#schedulePreview();
+  }
+
+  #isCellSelected(ruleId, dibKey, field) {
+    return this._cellSel.some(c => c.ruleId === ruleId && c.dibKey === dibKey && c.field === field);
+  }
+
+  #cellRangeSelect(ruleId, field, fromDibKey, toDibKey) {
+    const ruleEl  = this.element?.querySelector(`.preview-rule[data-rule-id="${CSS.escape(ruleId)}"]`);
+    if (!ruleEl) return;
+    const allRows = [...ruleEl.querySelectorAll('.preview-tr[data-item-key]')];
+    const keys    = allRows.map(r => r.dataset.itemKey.substring(ruleId.length + 2));
+    const fromIdx = keys.indexOf(fromDibKey);
+    const toIdx   = keys.indexOf(toDibKey);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const [lo, hi] = [Math.min(fromIdx, toIdx), Math.max(fromIdx, toIdx)];
+    this._cellSel       = keys.slice(lo, hi + 1).map(dibKey => ({ ruleId, dibKey, field }));
+    this._cellSelField  = field;
+    this._cellSelRuleId = ruleId;
+  }
+
+  #applyCellSelClasses() {
+    const el = this.element;
+    if (!el) return;
+    el.querySelectorAll('.preview-td.dib-cell-selected')
+      .forEach(td => td.classList.remove('dib-cell-selected'));
+    for (const { ruleId, dibKey, field } of this._cellSel) {
+      const row  = el.querySelector(`.preview-tr[data-item-key="${CSS.escape(`${ruleId}::${dibKey}`)}"]`);
+      const cell = row?.querySelector(`.preview-td[data-field="${CSS.escape(field)}"]`);
+      cell?.classList.add('dib-cell-selected');
+    }
+  }
+
+  #showMultiCellEditPopover(anchorTd, ruleId, field) {
+    document.querySelector('.dib-cell-popover')?.remove();
+    const count = this._cellSel.length;
+
+    const popover = document.createElement('div');
+    popover.className = 'dib-cell-popover';
+    popover.innerHTML = `
+      <div class="dib-cpop-label">Override ${count} cell${count !== 1 ? 's' : ''} — ${field.split('.').pop()}</div>
+      <input type="text" class="dib-cpop-input" placeholder="New value…">
+      <div class="dib-cpop-btns">
+        <button class="dib-btn dib-btn-sm dib-btn-primary dib-cpop-save">Save</button>
+        <button class="dib-btn dib-btn-sm dib-cpop-cancel">Cancel</button>
+      </div>`;
+    document.body.appendChild(popover);
+
+    const rect = anchorTd.getBoundingClientRect();
+    const pw   = popover.offsetWidth  || 220;
+    const ph   = popover.offsetHeight || 90;
+    let   top  = rect.bottom + 4;
+    if (top + ph > window.innerHeight - 8) top = rect.top - ph - 4;
+    popover.style.left = `${Math.max(4, Math.min(rect.left, window.innerWidth - pw - 8))}px`;
+    popover.style.top  = `${Math.max(4, top)}px`;
+
+    const input = popover.querySelector('.dib-cpop-input');
+    input.focus();
+
+    const save = () => {
+      const val = input.value;
+      for (const { ruleId: rid, dibKey, field: f } of this._cellSel) {
+        if (!this._cellOverrides[rid])         this._cellOverrides[rid] = {};
+        if (!this._cellOverrides[rid][dibKey]) this._cellOverrides[rid][dibKey] = {};
+        this._cellOverrides[rid][dibKey][f] = val;
+        this.#clearTestError(rid, dibKey, f);
+      }
+      popover.remove();
+      this.render();
+    };
+    const cancel = () => popover.remove();
+
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter')  { e.preventDefault(); save();   }
+      if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+    });
+    popover.querySelector('.dib-cpop-save').addEventListener('click',   save);
+    popover.querySelector('.dib-cpop-cancel').addEventListener('click', cancel);
+    const closeOut = e => {
+      if (!popover.contains(e.target)) { cancel(); document.removeEventListener('pointerdown', closeOut, true); }
+    };
+    setTimeout(() => document.addEventListener('pointerdown', closeOut, true), 0);
+  }
+
+  #clearTestError(ruleId, dibKey, field) {
+    const item = this._testErrors[ruleId]?.[dibKey];
+    if (!item) return;
+    delete item[field];
+    // If no specific field errors remain, clear the row-level error too
+    if (!Object.keys(item).some(k => k !== '_row')) {
+      delete this._testErrors[ruleId][dibKey];
+      if (!Object.keys(this._testErrors[ruleId]).length) delete this._testErrors[ruleId];
+    }
+  }
+
+  #applyTestErrorClasses() {
+    const el = this.element;
+    if (!el) return;
+    for (const [ruleId, items] of Object.entries(this._testErrors)) {
+      for (const [dibKey, fields] of Object.entries(items)) {
+        const rowKey = `${ruleId}::${dibKey}`;
+        const row = el.querySelector(`.preview-tr[data-item-key="${CSS.escape(rowKey)}"]`);
+        if (!row) continue;
+        if (fields._row) row.classList.add('dib-row-error');
+        for (const [field, errMsg] of Object.entries(fields)) {
+          if (field === '_row') continue;
+          const cell = row.querySelector(`.preview-td[data-field="${CSS.escape(field)}"]`);
+          if (cell) { cell.classList.add('dib-cell-error'); cell.title = errMsg; }
+        }
+      }
+    }
+  }
+
+  #applyOverrideClasses() {
+    const el = this.element;
+    if (!el) return;
+    for (const [ruleId, items] of Object.entries(this._cellOverrides)) {
+      for (const [dibKey, fields] of Object.entries(items)) {
+        const rowKey = `${ruleId}::${dibKey}`;
+        const row = el.querySelector(`.preview-tr[data-item-key="${CSS.escape(rowKey)}"]`);
+        if (!row) continue;
+        for (const field of Object.keys(fields)) {
+          const cell = row.querySelector(`.preview-td[data-field="${CSS.escape(field)}"]`);
+          cell?.classList.add('dib-cell-overridden');
+        }
+      }
+    }
+  }
+
+  #showColumnMenu(event, th) {
+    const ruleEl = th.closest('[data-rule-id]');
+    const ruleId = ruleEl?.dataset.ruleId;
+    const field  = th.dataset.field;
+    if (!ruleId || !field) return;
+
+    this.#showContextMenu(event, [
+      {
+        icon: 'fa-font',
+        label: 'Lowercase all values',
+        action: () => {
+          const rule        = this._rules.find(r => r.id === ruleId);
+          const ignoredKeys = new Set((rule?.ignoredItems ?? []).map(i => i._dibKey));
+          const items       = this._preview[ruleId] ?? [];
+          let changed = 0;
+          items.forEach((item, idx) => {
+            const dibKey = item.name ?? `_${idx}`;
+            if (ignoredKeys.has(dibKey)) return;
+            const flat   = foundry.utils.flattenObject(item);
+            const cur    = this._cellOverrides[ruleId]?.[dibKey]?.[field] !== undefined
+              ? String(this._cellOverrides[ruleId][dibKey][field])
+              : (flat[field] != null ? String(flat[field]) : null);
+            if (cur === null) return;
+            const lower = cur.toLowerCase();
+            if (lower === cur) return;
+            if (!this._cellOverrides[ruleId])         this._cellOverrides[ruleId] = {};
+            if (!this._cellOverrides[ruleId][dibKey]) this._cellOverrides[ruleId][dibKey] = {};
+            this._cellOverrides[ruleId][dibKey][field] = lower;
+            changed++;
+          });
+          if (changed > 0) this.render();
+        }
+      }
+    ]);
+  }
+
+  #showCellMenu(event, td) {
+    event.stopPropagation();
+    const ruleEl  = td.closest('[data-rule-id]');
+    const rowEl   = td.closest('[data-item-key]');
+    const ruleId  = ruleEl?.dataset.ruleId;
+    const itemKey = rowEl?.dataset.itemKey;
+    const field   = td.dataset.field;
+    if (!ruleId || !itemKey || !field) return;
+
+    const dibKey      = itemKey.substring(ruleId.length + 2);
+    const hasOverride = this._cellOverrides[ruleId]?.[dibKey]?.[field] !== undefined;
+    const inMultiSel  = this._cellSel.length > 1
+      && this._cellSelField === field
+      && this._cellSelRuleId === ruleId
+      && this.#isCellSelected(ruleId, dibKey, field);
+
+    const menuItems = [];
+
+    if (inMultiSel) {
+      menuItems.push({
+        icon: 'fa-edit',
+        label: `Override Selected (${this._cellSel.length} cells)`,
+        action: () => this.#showMultiCellEditPopover(td, ruleId, field)
+      });
+      menuItems.push({ separator: true });
+    }
+
+    menuItems.push({
+      icon: 'fa-edit',
+      label: 'Override Value',
+      action: () => this.#showCellEditPopover(td, ruleId, dibKey, field)
+    });
+
+    if (hasOverride) {
+      menuItems.push(
+        { separator: true },
+        { icon: 'fa-undo', label: 'Restore Default',
+          action: () => { delete this._cellOverrides[ruleId][dibKey][field]; this.render(); }
+        }
+      );
+    }
+
+    if (inMultiSel) {
+      const anyOverrides = this._cellSel.some(
+        c => this._cellOverrides[c.ruleId]?.[c.dibKey]?.[c.field] !== undefined
+      );
+      if (anyOverrides) {
+        menuItems.push({
+          icon: 'fa-undo',
+          label: `Restore All Selected`,
+          action: () => {
+            for (const c of this._cellSel) {
+              if (this._cellOverrides[c.ruleId]?.[c.dibKey])
+                delete this._cellOverrides[c.ruleId][c.dibKey][c.field];
+            }
+            this.render();
+          }
+        });
+      }
+    }
+
+    this.#showContextMenu(event, menuItems);
+  }
+
+  #showCellEditPopover(td, ruleId, dibKey, field) {
+    document.querySelector('.dib-cell-popover')?.remove();
+
+    const existing  = this._cellOverrides[ruleId]?.[dibKey]?.[field];
+    const startVal  = existing !== undefined ? existing : td.textContent.trim();
+    const safeVal   = String(startVal).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+
+    const popover = document.createElement('div');
+    popover.className = 'dib-cell-popover';
+    popover.innerHTML = `
+      <div class="dib-cpop-label">${field.split('.').pop()}</div>
+      <input type="text" class="dib-cpop-input" value="${safeVal}">
+      <div class="dib-cpop-btns">
+        <button class="dib-btn dib-btn-sm dib-btn-primary dib-cpop-save">Save</button>
+        <button class="dib-btn dib-btn-sm dib-cpop-cancel">Cancel</button>
+      </div>`;
+    document.body.appendChild(popover);
+
+    // Position below the cell (flip above if near bottom)
+    const rect = td.getBoundingClientRect();
+    const pw   = popover.offsetWidth  || 220;
+    const ph   = popover.offsetHeight || 90;
+    const left = Math.min(rect.left, window.innerWidth  - pw - 8);
+    let   top  = rect.bottom + 4;
+    if (top + ph > window.innerHeight - 8) top = rect.top - ph - 4;
+    popover.style.left = `${Math.max(4, left)}px`;
+    popover.style.top  = `${Math.max(4, top)}px`;
+
+    const input = popover.querySelector('.dib-cpop-input');
+    input.focus();
+    input.select();
+
+    const save = () => {
+      if (!this._cellOverrides[ruleId])         this._cellOverrides[ruleId] = {};
+      if (!this._cellOverrides[ruleId][dibKey]) this._cellOverrides[ruleId][dibKey] = {};
+      this._cellOverrides[ruleId][dibKey][field] = input.value;
+      this.#clearTestError(ruleId, dibKey, field);
+      popover.remove();
+      this.render();
+    };
+    const cancel = () => popover.remove();
+
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter')  { e.preventDefault(); save();   }
+      if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+    });
+    popover.querySelector('.dib-cpop-save').addEventListener('click',   save);
+    popover.querySelector('.dib-cpop-cancel').addEventListener('click', cancel);
+
+    const closeOut = e => {
+      if (!popover.contains(e.target)) { cancel(); document.removeEventListener('pointerdown', closeOut, true); }
+    };
+    setTimeout(() => document.addEventListener('pointerdown', closeOut, true), 0);
   }
 
   #showContextMenu(event, items) {
@@ -1006,6 +1379,8 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     if (!confirmed) return;
     this._rules = this._rules.filter(r => r.id !== id);
     delete this._preview[id];
+    delete this._cellOverrides[id];
+    delete this._testErrors[id];
     if (this._selectedRuleId === id) this._selectedRuleId = this._rules[0]?.id ?? null;
     this.render();
   }
@@ -1122,6 +1497,249 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     await this.#runPreview();
   }
 
+  static async #testRun() {
+    const hasPreviews = this._rules.some(r => (this._preview[r.id]?.length ?? 0) > 0);
+    if (!hasPreviews) {
+      ui.notifications.warn('Run a Refresh first so there are items to validate.');
+      return;
+    }
+
+    this._testErrors = {};
+    const ItemClass = CONFIG.Item.documentClass;
+
+    // Suppress Foundry notification toasts during validation
+    const origError = ui.notifications.error.bind(ui.notifications);
+    const origWarn  = ui.notifications.warn.bind(ui.notifications);
+    const origInfo  = ui.notifications.info.bind(ui.notifications);
+    ui.notifications.error = () => {};
+    ui.notifications.warn  = () => {};
+    ui.notifications.info  = () => {};
+
+    try {
+      for (const rule of this._rules) {
+        const rawItems = this._preview[rule.id];
+        if (!rawItems?.length || !rule.itemType) continue;
+        const ignoredKeys = new Set((rule.ignoredItems ?? []).map(i => i._dibKey));
+
+        for (const [idx, parsed] of rawItems.entries()) {
+          const dibKey = parsed.name ?? `_${idx}`;
+          if (ignoredKeys.has(dibKey)) continue;
+
+          // Apply overrides so test reflects the same data that would be built
+          const effective = Object.assign({}, parsed);
+          const ovr = this._cellOverrides[rule.id]?.[dibKey] ?? {};
+          for (const [f, v] of Object.entries(ovr)) effective[f] = v;
+
+          // Build the same data structure as buildItems does
+          const doc = { name: String(effective.name ?? 'Unnamed Item').trim() || 'Unnamed Item',
+                        type: rule.itemType, system: {} };
+          for (const [field, value] of Object.entries(effective)) {
+            if (['name','type','folder','_key','_dibKey'].includes(field)) continue;
+            if (field.startsWith('_')) continue;
+            if (field.startsWith('system.')) foundry.utils.setProperty(doc, field, value);
+            else doc[field] = value;
+          }
+
+          // Test: construct in memory — triggers DataModel schema validation
+          let rowError = null;
+          let fieldErrors = {};
+          try {
+            new ItemClass(doc, { parent: null });
+          } catch (err) {
+            rowError = err.message ?? String(err);
+            // DataModelValidationError exposes per-field errors
+            const rawFields = err.fields ?? err.errors ?? {};
+            for (const [fp, fe] of Object.entries(rawFields)) {
+              const norm = fp.includes('.') ? fp : `system.${fp}`;
+              fieldErrors[norm] = fe?.message ?? fe?.toString() ?? rowError;
+            }
+          }
+
+          if (rowError) {
+            if (!this._testErrors[rule.id])         this._testErrors[rule.id] = {};
+            if (!this._testErrors[rule.id][dibKey]) this._testErrors[rule.id][dibKey] = {};
+            this._testErrors[rule.id][dibKey]._row = rowError;
+
+            // If no structured field map, isolate by testing each mapped field individually
+            if (!Object.keys(fieldErrors).length) {
+              for (const attr of rule.attributes) {
+                if (!attr.foundryField) continue;
+                const val = foundry.utils.getProperty(doc, attr.foundryField);
+                if (val === undefined) continue;
+                const minDoc = { name: doc.name, type: rule.itemType };
+                foundry.utils.setProperty(minDoc, attr.foundryField, val);
+                try { new ItemClass(minDoc, { parent: null }); }
+                catch (fe) { fieldErrors[attr.foundryField] = fe.message ?? String(fe); }
+              }
+            }
+
+            Object.assign(this._testErrors[rule.id][dibKey], fieldErrors);
+          }
+        }
+      }
+    } finally {
+      ui.notifications.error = origError;
+      ui.notifications.warn  = origWarn;
+      ui.notifications.info  = origInfo;
+    }
+
+    const errorCount = Object.values(this._testErrors)
+      .reduce((n, items) => n + Object.values(items).filter(f => f._row).length, 0);
+
+    // Switch to Items Preview tab so errors are visible
+    this._rightTab = 'preview';
+
+    if (errorCount === 0) {
+      ui.notifications.info('Test Run: All items passed validation.');
+    } else {
+      ui.notifications.warn(`Test Run: ${errorCount} item(s) have validation errors — see red rows in Items Preview.`);
+    }
+    this.render();
+  }
+
+  // ── Suggested Links actions ──────────────────────────────────────────────
+
+  // ── Attribute mapping actions ────────────────────────────────────────────
+
+  static async #openAttributeMenu(event, target) {
+    const foundryField = target.dataset.foundryField;
+    const rule = this.selectedRule;
+    if (!rule || !foundryField) return;
+
+    const mapping  = rule.attributes.find(a => a.foundryField === foundryField && a.columnHeader);
+    const inPreview = (rule.manualColumns ?? []).includes(foundryField);
+    const menuItems = [
+      {
+        icon: 'fa-search',
+        label: 'Inspect / Edit Mapping',
+        action: () => this.#showAttributeDialog(foundryField)
+      }
+    ];
+    if (mapping) {
+      menuItems.push({
+        icon: 'fa-unlink',
+        label: `Remove Link  (${mapping.columnHeader})`,
+        action: () => {
+          rule.attributes = rule.attributes.filter(
+            a => !(a.foundryField === foundryField && a.columnHeader === mapping.columnHeader)
+          );
+          this.#schedulePreview();
+          this.render();
+        }
+      });
+    } else if (inPreview) {
+      menuItems.push({
+        icon: 'fa-eye-slash',
+        label: 'Remove from Preview',
+        action: () => {
+          rule.manualColumns = (rule.manualColumns ?? []).filter(p => p !== foundryField);
+          this.render();
+        }
+      });
+    } else {
+      menuItems.push({
+        icon: 'fa-eye',
+        label: 'Add to Preview',
+        action: () => {
+          rule.manualColumns = [...(rule.manualColumns ?? []), foundryField];
+          this.render();
+        }
+      });
+    }
+    this.#showContextMenu(event, menuItems);
+  }
+
+  static async #acceptSuggestion(event, target) {
+    const rule   = this.selectedRule;
+    const header = target.dataset.columnHeader;
+    const field  = target.dataset.suggestedField;
+    if (!rule || !header || !field) return;
+    if (!rule.attributes.some(a => a.columnHeader === header && a.foundryField === field)) {
+      rule.attributes.push({ ...makeDefaultAttribute(), columnHeader: header, foundryField: field });
+      this.#schedulePreview();
+      this.render();
+    }
+  }
+
+  static async #linkAllSuggestions(event, target) {
+    const rule = this.selectedRule;
+    if (!rule || !this._scanData) return;
+    const attrPaths = this._cachedAttributePaths ?? [];
+    if (!attrPaths.length) return;
+    const suggestions = computeSuggestionsForRule(rule, this._scanData, attrPaths);
+    let added = 0;
+    for (const s of suggestions) {
+      if (!rule.attributes.some(a => a.columnHeader === s.columnHeader && a.foundryField === s.suggestedField)) {
+        rule.attributes.push({ ...makeDefaultAttribute(), columnHeader: s.columnHeader, foundryField: s.suggestedField });
+        added++;
+      }
+    }
+    if (added > 0) { this.#schedulePreview(); this.render(); }
+  }
+
+  async #showAttributeDialog(foundryField) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+
+    const existing = rule.attributes.find(a => a.foundryField === foundryField && a.columnHeader);
+    const columns  = [...new Set(
+      this._scanData?.tables?.flatMap(t => t.columns.map(c => c.header)).filter(h => h) ?? []
+    )];
+
+    const colOpts = columns.map(h =>
+      `<option value="${h.replace(/"/g, '&quot;')}"${existing?.columnHeader === h ? ' selected' : ''}>${h}</option>`
+    ).join('');
+    const txOpts = [
+      ['trim','Trim whitespace'], ['number','Number'], ['lowercase','Lowercase'],
+      ['uppercase','Uppercase'],  ['boolean','Boolean (yes/true/1/x)']
+    ].map(([v, l]) =>
+      `<option value="${v}"${(existing?.transform ?? 'trim') === v ? ' selected' : ''}>${l}</option>`
+    ).join('');
+
+    const content = `
+      <div style="display:flex;flex-direction:column;gap:10px;padding:4px 0">
+        <div>
+          <div style="font-size:0.75em;color:#9494a0;margin-bottom:2px">Foundry Field</div>
+          <div style="font-family:monospace;font-size:0.9em;color:#7ab0d4">${foundryField}</div>
+        </div>
+        <div>
+          <label style="display:block;font-size:0.8em;color:#9494a0;margin-bottom:3px">Column Header</label>
+          <select id="dib-dlg-col" style="width:100%">
+            <option value="">— Remove mapping —</option>
+            ${colOpts}
+          </select>
+        </div>
+        <div>
+          <label style="display:block;font-size:0.8em;color:#9494a0;margin-bottom:3px">Transform</label>
+          <select id="dib-dlg-tx" style="width:100%">${txOpts}</select>
+        </div>
+      </div>`;
+
+    const result = await foundry.applications.api.DialogV2.prompt({
+      window: { title: `Map: ${foundryField.split('.').pop()}` },
+      content,
+      ok: {
+        label: 'Save',
+        callback: (_e, _btn, dlg) => ({
+          column:    dlg.element.querySelector('#dib-dlg-col').value,
+          transform: dlg.element.querySelector('#dib-dlg-tx').value
+        })
+      },
+      rejectClose: false
+    });
+    if (!result) return;
+
+    rule.attributes = rule.attributes.filter(a => a.foundryField !== foundryField);
+    if (result.column) {
+      rule.attributes.push({
+        ...makeDefaultAttribute(), foundryField,
+        columnHeader: result.column, transform: result.transform
+      });
+    }
+    this.#schedulePreview();
+    this.render();
+  }
+
   static async #buildItems() {
     if (!this._pdf) { ui.notifications.warn('Load a PDF first.'); return; }
     const hasPreviews = this._rules.some(r => (this._preview[r.id]?.length ?? 0) > 0);
@@ -1131,7 +1749,8 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     for (const rule of this._rules) {
       const items = this._preview[rule.id];
       if (!items?.length || !rule.itemType) continue;
-      const folder = rule.folderId ? game.folders.get(rule.folderId) ?? null : null;
+      const folderId = rule.folderId || this._selectedFolderId;
+      const folder   = folderId ? game.folders.get(folderId) ?? null : null;
       try {
         const created = await buildItems(items, rule.itemType, folder);
         total += created.length;
@@ -1233,11 +1852,10 @@ function makeDefaultRule() {
     rowDetectionPattern: '',
     skipPattern:         '',
     fontFilter:          { name: '', minSize: '', maxSize: '' },
-    mixedConfig:         { tableXMin: 0, tableXMax: 9999, textXMin: 0, textXMax: 9999 },
-    descriptionField:    '',
     attributes:          [],
     ignoredItems:        [],
-    regions:             []
+    regions:             [],
+    manualColumns:       []
   };
 }
 
@@ -1252,12 +1870,6 @@ function makeDefaultAttribute() {
 // Constants
 // -------------------------------------------------------------------------
 
-const CONTENT_TYPES = [
-  { value: 'table',  label: 'Table (grid layout)' },
-  { value: 'column', label: 'Column Text (prose)' },
-  { value: 'mixed',  label: 'Mixed (table + prose)' }
-];
-
 const TRANSFORMS = [
   { value: 'trim',      label: 'Trim whitespace' },
   { value: 'number',    label: 'Number' },
@@ -1265,3 +1877,119 @@ const TRANSFORMS = [
   { value: 'uppercase', label: 'Uppercase' },
   { value: 'boolean',   label: 'Boolean (yes/true/1/x)' }
 ];
+
+// -------------------------------------------------------------------------
+// Attribute suggestion helpers
+// -------------------------------------------------------------------------
+
+/**
+ * Score how well a column header text matches an attribute path (0–1).
+ * Handles camelCase paths, abbreviations, and parenthetical suffixes like "(GP)".
+ */
+function scoreAttributeMatch(header, attrPath) {
+  if (!header || !attrPath) return 0;
+  const norm = s => s
+    .replace(/([a-z])([A-Z])/g, '$1 $2')   // split camelCase → words
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')           // strip punctuation/parens
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const h      = norm(header);
+  const last   = norm(attrPath.split('.').pop());
+  if (!h || !last) return 0;
+
+  // Exact match
+  if (h === last) return 1.0;
+
+  const hWords = h.split(' ').filter(w => w.length >= 2);
+  const lWords = last.split(' ').filter(w => w.length >= 1);
+  if (!hWords.length || !lWords.length) return 0;
+
+  // Every attribute word is covered by a header word (exact or shared prefix ≥3 chars)
+  const allCovered = lWords.every(lw =>
+    hWords.some(hw =>
+      hw === lw ||
+      (hw.length >= 3 && lw.startsWith(hw)) ||
+      (lw.length >= 3 && hw.startsWith(lw))
+    )
+  );
+  if (allCovered) return 0.9;
+
+  // Partial word overlap score
+  let matched = 0;
+  for (const hw of hWords) {
+    if (lWords.some(lw =>
+      lw === hw ||
+      (hw.length >= 3 && lw.startsWith(hw)) ||
+      (lw.length >= 3 && hw.startsWith(lw))
+    )) matched++;
+  }
+  if (!matched) return 0;
+  return (matched / Math.max(hWords.length, lWords.length)) * 0.75;
+}
+
+/**
+ * Compute suggested column→field mappings for a rule from its detected table
+ * columns and the available item attribute paths.
+ */
+function computeSuggestionsForRule(rule, scanData, attrPaths) {
+  const allHeaders = [...new Set(
+    scanData.tables.flatMap(t => t.columns.map(c => c.header)).filter(h => h)
+  )];
+  if (!allHeaders.length || !attrPaths.length) return [];
+
+  const MIN_SCORE = 0.4;
+  const suggestions = [];
+
+  for (let i = 0; i < allHeaders.length; i++) {
+    const header = allHeaders[i];
+    let bestPath  = null;
+    let bestScore = 0;
+
+    for (const attr of attrPaths) {
+      let score = scoreAttributeMatch(header, attr.path);
+      // First column is almost always the item name — boost it
+      if (i === 0 && attr.path === 'name') score = Math.max(score, 0.80);
+      // Explicit "name" word in header → strong hint
+      if (/\bname\b/i.test(header) && attr.path === 'name') score = Math.max(score, 0.95);
+      if (score > bestScore) { bestScore = score; bestPath = attr.path; }
+    }
+
+    const threshold = i === 0 ? 0.5 : MIN_SCORE;
+    if (!bestPath || bestScore < threshold) continue;
+
+    const alreadyLinked = rule.attributes.some(a => a.columnHeader === header && a.foundryField);
+    suggestions.push({
+      columnHeader:   header,
+      suggestedField: bestPath,
+      score:          bestScore,
+      scoreLabel:     bestScore >= 0.9 ? 'High' : bestScore >= 0.65 ? 'Med' : 'Low',
+      scoreClass:     bestScore >= 0.9 ? 'high' : bestScore >= 0.65 ? 'med' : 'low',
+      alreadyLinked
+    });
+  }
+
+  return suggestions;
+}
+
+/**
+ * Return a shallow copy of scanData with each column enriched with a `status`
+ * field: 'linked' | 'suggested' | 'none'.
+ */
+function enrichScanDataColumns(scanData, rule, suggestions) {
+  if (!scanData) return null;
+  return {
+    ...scanData,
+    tables: scanData.tables.map(table => ({
+      ...table,
+      columns: table.columns.map(col => {
+        if (!col.header) return { ...col, status: 'none' };
+        const linked    = rule?.attributes.some(a => a.columnHeader === col.header && a.foundryField);
+        if (linked) return { ...col, status: 'linked' };
+        const suggested = suggestions.some(s => s.columnHeader === col.header);
+        return { ...col, status: suggested ? 'suggested' : 'none' };
+      })
+    }))
+  };
+}

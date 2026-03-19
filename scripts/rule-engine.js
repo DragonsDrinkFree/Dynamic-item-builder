@@ -3,7 +3,7 @@
  * an array of detected items: [{ name, [foundryField]: value, ... }]
  */
 
-import { extractPages, parsePageString, mergePageItems, groupIntoRows, detectColumns, mapRowsToCells, detectTables } from './pdf-parser.js';
+import { extractPages, parsePageString, mergePageItems, detectColumns, mapRowsToCells, detectTables } from './pdf-parser.js';
 
 /**
  * Apply a rule to a loaded PDF document.
@@ -22,16 +22,10 @@ export async function applyRule(rule, pdfDoc) {
     return applyRuleWithRegions(rule, pages, tableRegions);
   }
 
-  // Legacy path (no regions defined)
+  // Auto-detect fallback (no regions defined)
   let items = mergePageItems(pages);
   items = applyFontFilter(items, rule.fontFilter);
-
-  switch (rule.contentType) {
-    case 'table':  return parseTable(items, rule);
-    case 'column': return parseColumn(items, rule);
-    case 'mixed':  return parseMixed(items, rule);
-    default:       return parseTable(items, rule);
-  }
+  return parseTable(items, rule);
 }
 
 /**
@@ -92,7 +86,7 @@ function applyRuleWithRegions(rule, pages, regions) {
         if (!rowText.trim()) continue;
         if (skipRe?.test(rowText)) continue;
 
-        const item = extractAttributes(cells, rule.attributes, 'table', rule);
+        const item = extractAttributes(cells, rule.attributes, rule);
         if (item) results.push(item);
       }
     }
@@ -156,92 +150,18 @@ function parseTable(items, rule) {
     if (!rowText) continue;
     if (skipRe?.test(rowText)) continue;
 
-    const item = extractAttributes(cells, rule.attributes, 'table', rule);
+    const item = extractAttributes(cells, rule.attributes, rule);
     if (item) results.push(item);
   }
 
   return results;
-}
-
-// ---------------------------------------------------------------------------
-// Column / prose parser
-// ---------------------------------------------------------------------------
-
-function parseColumn(items, rule) {
-  if (!rule.rowDetectionPattern?.trim()) return [];
-
-  // Build full text preserving approximate line breaks
-  const sorted = [...items].sort((a, b) => a.y - b.y || a.x - b.x);
-  const fullText = buildFullText(sorted);
-
-  const startRe = safeRegex(rule.rowDetectionPattern, 'gm');
-  if (!startRe) return [];
-
-  const matches = [...fullText.matchAll(startRe)];
-  if (matches.length === 0) return [];
-
-  const skipRe = rule.skipPattern?.trim() ? safeRegex(rule.skipPattern) : null;
-  const results = [];
-
-  for (let i = 0; i < matches.length; i++) {
-    const start = matches[i].index;
-    const end = matches[i + 1]?.index ?? fullText.length;
-    const chunk = fullText.slice(start, end);
-
-    if (skipRe?.test(chunk)) continue;
-
-    const context = { _raw: chunk, _match: matches[i] };
-    const item = extractAttributes(context, rule.attributes, 'column', rule);
-    if (item) results.push(item);
-  }
-
-  return results;
-}
-
-// ---------------------------------------------------------------------------
-// Mixed parser (table data + column descriptions)
-// ---------------------------------------------------------------------------
-
-function parseMixed(items, rule) {
-  const cfg = rule.mixedConfig ?? {};
-  const { tableXMin = 0, tableXMax = 9999, textXMin = 0, textXMax = 9999 } = cfg;
-
-  const tableItems = items.filter(i => i.x >= tableXMin && i.x <= tableXMax);
-  const textItems  = items.filter(i => i.x >= textXMin  && i.x <= textXMax);
-
-  // Parse structure from table
-  const tableResults = parseTable(tableItems, rule);
-
-  // Optionally augment with prose descriptions keyed by item name
-  if (rule.descriptionField && textItems.length > 0) {
-    const rows = groupIntoRows(textItems);
-    const fullText = buildFullText(rows.flatMap(r => r.items));
-
-    if (rule.rowDetectionPattern?.trim()) {
-      const startRe = safeRegex(rule.rowDetectionPattern, 'gm');
-      if (startRe) {
-        const matches = [...fullText.matchAll(startRe)];
-        for (const tableItem of tableResults) {
-          const nameVal = tableItem.name ?? '';
-          const m = matches.find(m => m[0].toLowerCase().includes(nameVal.toLowerCase()));
-          if (m) {
-            const start = m.index;
-            const end = (matches[matches.indexOf(m) + 1]?.index) ?? fullText.length;
-            setNestedValue(tableItem, rule.descriptionField, fullText.slice(start, end).trim());
-          }
-        }
-      }
-    }
-  }
-
-  return tableResults;
 }
 
 // ---------------------------------------------------------------------------
 // Attribute extraction
 // ---------------------------------------------------------------------------
 
-function extractAttributes(context, attributeRules, mode, rule) {
+function extractAttributes(context, attributeRules, rule) {
   const result = {};
   let hasData = false;
 
@@ -250,16 +170,11 @@ function extractAttributes(context, attributeRules, mode, rule) {
 
     let value = '';
 
-    if (mode === 'table') {
-      // Prefer named column, fall back to column index
-      if (attrRule.columnHeader) {
-        value = context[attrRule.columnHeader] ?? context[`_col${attrRule.columnIndex}`] ?? '';
-      } else if (attrRule.columnIndex != null && attrRule.columnIndex !== '') {
-        value = context[`_col${attrRule.columnIndex}`] ?? '';
-      }
-    } else {
-      // Column / raw text mode
-      value = context._raw ?? '';
+    // Prefer named column, fall back to column index
+    if (attrRule.columnHeader) {
+      value = context[attrRule.columnHeader] ?? context[`_col${attrRule.columnIndex}`] ?? '';
+    } else if (attrRule.columnIndex != null && attrRule.columnIndex !== '') {
+      value = context[`_col${attrRule.columnIndex}`] ?? '';
     }
 
     // Optionally refine with a regex
@@ -290,19 +205,6 @@ function safeRegex(pattern, flags = '') {
   } catch {
     return null;
   }
-}
-
-function buildFullText(items) {
-  // Insert newlines between items whose Y differs significantly
-  let text = '';
-  let lastY = null;
-  for (const item of items) {
-    if (lastY !== null && Math.abs(item.y - lastY) > 6) text += '\n';
-    else if (text && !text.endsWith('\n')) text += ' ';
-    text += item.text;
-    lastY = item.y;
-  }
-  return text;
 }
 
 function applyTransform(value, transform) {
