@@ -7,6 +7,10 @@
  * Coordinates are in PDF user units with Y flipped so (0,0) is top-left.
  */
 
+// Set to true in the browser console to log table-detection internals:
+//   DIB_DEBUG = true
+// Check: globalThis.DIB_DEBUG
+
 const PDFJS_VERSION = '4.4.168';
 const PDFJS_CDN = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}/build`;
 
@@ -317,6 +321,7 @@ function findXGroupDividers(rows) {
  * Each table.rows entry: { cells: [{column, value}], rawText }
  */
 export function detectTables(items, rowThreshold = 8) {
+  if (globalThis.DIB_DEBUG) console.debug('DIB | detectTables called, items:', items.length);
   const rows = groupIntoRows(items, rowThreshold);
 
   // Detect side-by-side tables: if a dominant X gap splits all rows into
@@ -344,6 +349,13 @@ export function detectTables(items, rowThreshold = 8) {
   let current = null;
   for (const row of rows) {
     const kind = row.items.length >= 2 ? 'table' : 'prose';
+    // A single-item row inside an active table segment is likely a wrapped
+    // cell (e.g. "Universal\nAutopistol"). Merge it into the previous table
+    // row so it doesn't break the segment and strand the rows that follow.
+    if (kind === 'prose' && row.items.length === 1 && current?.kind === 'table') {
+      current.rows[current.rows.length - 1].items.push(...row.items);
+      continue;
+    }
     if (current?.kind === kind) {
       current.rows.push(row);
     } else {
@@ -356,8 +368,14 @@ export function detectTables(items, rowThreshold = 8) {
   const tables = [];
   const proseRows = [];
 
+  if (globalThis.DIB_DEBUG) {
+    console.debug(`DIB | detectTables: ${segments.length} segment(s)`, segments.map(s =>
+      `[${s.kind} × ${s.rows.length} rows] first="${s.rows[0].items.map(i=>i.text).join(' | ')}"`));
+  }
+
   for (const seg of segments) {
     if (seg.kind === 'prose' || seg.rows.length < 2) {
+      if (globalThis.DIB_DEBUG) console.debug(`DIB | segment → prose/short (kind=${seg.kind}, rows=${seg.rows.length}):`, seg.rows.map(r => r.items.map(i=>i.text).join(' | ')));
       proseRows.push(...seg.rows);
       continue;
     }
@@ -366,6 +384,7 @@ export function detectTables(items, rowThreshold = 8) {
     // sentence or page title that happens to have multiple items).
     const headerRow = seg.rows[0];
     if (!isPlausibleHeaderRow(headerRow)) {
+      if (globalThis.DIB_DEBUG) console.debug('DIB | segment → prose (header failed plausibility):', headerRow.items.map(i=>i.text).join(' | '));
       proseRows.push(...seg.rows);
       continue;
     }
@@ -498,14 +517,28 @@ export function applyColumnSplits(tables, columnSplits) {
  * Tightly-packed items are sentence/title fragments (e.g. "Part Six Equipment").
  */
 function isPlausibleHeaderRow(row) {
-  if (row.items.length < 2) return false;
+  if (row.items.length < 2) {
+    if (globalThis.DIB_DEBUG) console.debug('DIB | isPlausibleHeaderRow FAIL (< 2 items):', row.items.map(i => i.text));
+    return false;
+  }
   const sorted = [...row.items].sort((a, b) => a.x - b.x);
   let totalGap = 0;
+  const gaps = [];
   for (let i = 1; i < sorted.length; i++) {
     const prevEnd = sorted[i - 1].x + Math.max(sorted[i - 1].width ?? 0, 1);
-    totalGap += Math.max(0, sorted[i].x - prevEnd);
+    const gap = Math.max(0, sorted[i].x - prevEnd);
+    totalGap += gap;
+    gaps.push({ between: `"${sorted[i-1].text}" → "${sorted[i].text}"`, gap: gap.toFixed(1) });
   }
-  return (totalGap / (sorted.length - 1)) >= 15;
+  const avgGap = totalGap / (sorted.length - 1);
+  const pass = avgGap >= 8;
+  if (globalThis.DIB_DEBUG) {
+    console.debug(`DIB | isPlausibleHeaderRow ${pass ? 'PASS' : 'FAIL'} (avgGap=${avgGap.toFixed(1)}, need ≥8)`,
+      '\n  items:', sorted.map(i => `"${i.text}" x=${i.x.toFixed(1)} w=${(i.width??0).toFixed(1)}`),
+      '\n  gaps:', gaps);
+  }
+  // Threshold: prose word-spacing is ~3-5 units; real column gaps are ≥8.
+  return avgGap >= 8;
 }
 
 /**
