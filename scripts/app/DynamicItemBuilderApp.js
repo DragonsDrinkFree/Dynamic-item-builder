@@ -386,6 +386,8 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
     // Scan cell clicks (Table Preview)
     el.querySelector('.dib-scan-content')?.addEventListener('click', e => {
+      const hdrBtn = e.target.closest('.dib-set-headers-btn');
+      if (hdrBtn) { e.stopPropagation(); this.#showSetHeadersPopover(e, hdrBtn.dataset.tableId); return; }
       this.#handleScanClick(e);
     });
 
@@ -915,10 +917,39 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       this._scanData = null;
     }
 
+    // Apply any manually-set column headers stored in the rule
+    this.#applyManualHeaders(rule);
+
     // Auto-populate headerPattern from the first labeled column if not already set
     if (rule && !rule.headerPattern?.trim() && this._scanData?.tables?.[0]?.columns?.length) {
       const firstHeader = this._scanData.tables[0].columns.find(c => c.header)?.header;
       if (firstHeader) rule.headerPattern = firstHeader;
+    }
+  }
+
+  #applyManualHeaders(rule) {
+    if (!this._scanData?.tables || !rule?.manualHeaders) return;
+    for (const table of this._scanData.tables) {
+      const override = rule.manualHeaders[table.id];
+      if (!override?.headers?.length) continue;
+      const { headers, originalHeaders } = override;
+
+      // Remap existing row cells from whatever they're currently named → new names (by index)
+      for (const row of table.rows) {
+        row.cells = row.cells.map((cell, i) => ({ ...cell, column: headers[i] ?? cell.column }));
+      }
+
+      // Prepend the originally-detected header row as the first data row
+      if (originalHeaders?.some(h => h)) {
+        table.rows.unshift({
+          cells:   headers.map((h, i) => ({ column: h, value: originalHeaders[i] ?? '' })),
+          rawText: originalHeaders.join(' '),
+          _injected: true
+        });
+      }
+
+      // Apply new column names
+      headers.forEach((h, i) => { if (table.columns[i]) table.columns[i].header = h; });
     }
   }
 
@@ -1036,6 +1067,93 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       }
     }
     this.#showContextMenu(event, menuItems);
+  }
+
+  #showSetHeadersPopover(event, tableId) {
+    document.querySelector('.dib-cell-popover')?.remove();
+    const rule  = this.selectedRule;
+    const table = this._scanData?.tables?.find(t => t.id === tableId);
+    if (!rule || !table) return;
+
+    const existing        = rule.manualHeaders?.[tableId];
+    // Original headers: the raw text the parser detected as column headers (captured once)
+    const originalHeaders = existing?.originalHeaders ?? table.columns.map(c => c.header ?? '');
+    // Current user-defined names (or column numbers if first time)
+    const currentHeaders  = existing?.headers ?? table.columns.map((_, i) => `Col ${i + 1}`);
+
+    const esc = s => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    const inputsHtml = table.columns.map((_, i) => {
+      const orig = esc(originalHeaders[i] ?? `Col ${i + 1}`);
+      const cur  = esc(currentHeaders[i]  ?? '');
+      return `<div class="dib-hpop-col">
+        <label class="dib-hpop-label" title="Original: ${orig}">${orig}</label>
+        <input type="text" class="dib-cpop-input dib-hpop-input" data-col-idx="${i}"
+               value="${cur}" placeholder="${orig}">
+      </div>`;
+    }).join('');
+
+    const popover = document.createElement('div');
+    popover.className = 'dib-cell-popover dib-headers-popover';
+    popover.innerHTML = `
+      <div class="dib-cpop-label">Create Column Headers <span style="font-weight:400;text-transform:none;font-size:9px;color:#666">(original values shown as labels)</span></div>
+      <div class="dib-hpop-inputs">${inputsHtml}</div>
+      <div class="dib-cpop-btns">
+        <button class="dib-btn dib-btn-sm dib-btn-primary dib-cpop-save">Save</button>
+        <button class="dib-btn dib-btn-sm dib-cpop-cancel">Cancel</button>
+      </div>`;
+    document.body.appendChild(popover);
+
+    const btn  = event.target.closest('.dib-set-headers-btn');
+    const rect = btn?.getBoundingClientRect() ?? { bottom: event.clientY, left: event.clientX, top: event.clientY };
+    const pw   = popover.offsetWidth  || 300;
+    const ph   = popover.offsetHeight || 120;
+    let   top  = rect.bottom + 4;
+    if (top + ph > window.innerHeight - 8) top = rect.top - ph - 4;
+    popover.style.left = `${Math.max(4, Math.min(rect.left, window.innerWidth - pw - 8))}px`;
+    popover.style.top  = `${Math.max(4, top)}px`;
+
+    const inputs = [...popover.querySelectorAll('.dib-hpop-input')];
+    inputs[0]?.focus();
+
+    const save = () => {
+      const headers = inputs.map(inp => inp.value.trim());
+      if (!rule.manualHeaders) rule.manualHeaders = {};
+      rule.manualHeaders[tableId] = { headers, originalHeaders };
+
+      // Remove any previously injected row, then remap existing cells by index
+      table.rows = table.rows.filter(r => !r._injected);
+      for (const row of table.rows) {
+        row.cells = row.cells.map((cell, i) => ({ ...cell, column: headers[i] ?? cell.column }));
+      }
+
+      // Inject original header values as the first data row
+      if (originalHeaders.some(h => h)) {
+        table.rows.unshift({
+          cells:   headers.map((h, i) => ({ column: h, value: originalHeaders[i] ?? '' })),
+          rawText: originalHeaders.join(' '),
+          _injected: true
+        });
+      }
+
+      // Apply new column names
+      headers.forEach((h, i) => { if (table.columns[i]) table.columns[i].header = h; });
+
+      popover.remove();
+      this.render();
+    };
+    const cancel = () => popover.remove();
+
+    popover.querySelector('.dib-cpop-save').addEventListener('click', save);
+    popover.querySelector('.dib-cpop-cancel').addEventListener('click', cancel);
+    inputs.forEach(inp => inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter')  { e.preventDefault(); save();   }
+      if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+    }));
+
+    const closeOut = e => {
+      if (!popover.contains(e.target)) { cancel(); document.removeEventListener('pointerdown', closeOut, true); }
+    };
+    setTimeout(() => document.addEventListener('pointerdown', closeOut, true), 0);
   }
 
   #mapColumnToField(rule, columnHeader, foundryField) {
@@ -1924,7 +2042,8 @@ function makeDefaultRule() {
     attributes:          [],
     ignoredItems:        [],
     regions:             [],
-    manualColumns:       []
+    manualColumns:       [],
+    manualHeaders:       {}
   };
 }
 

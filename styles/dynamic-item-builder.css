@@ -1632,3 +1632,41 @@ div.ignore-tr {
   gap: 6px;
   justify-content: flex-end;
 }
+/* Set Headers popover */
+.dib-headers-popover {
+  min-width: 300px;
+  max-width: min(700px, 90vw);
+}
+.dib-hpop-inputs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.dib-hpop-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 80px;
+  flex: 1 1 80px;
+}
+.dib-hpop-label {
+  font-size: 10px;
+  color: var(--dib-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.dib-hpop-input {
+  font-size: 12px !important;
+  padding: 3px 6px !important;
+}
+/* Set Headers button in scan table label */
+.scan-table-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dib-set-headers-btn {
+  margin-left: auto;
+  opacity: 0.7;
+}
+.dib-set-headers-btn:hover { opacity: 1; }
