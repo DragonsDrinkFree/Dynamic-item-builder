@@ -8,7 +8,7 @@
 
 import {
   loadPDF, extractPages, parsePageString, mergePageItems,
-  detectTables, renderPageToCanvas, applyColumnSplits
+  detectTables, renderPageToCanvas, applyColumnMerges, applyColumnSplits
 } from '../pdf-parser.js';
 import { applyRule }   from '../rule-engine.js';
 import { buildItems }  from '../item-builder.js';
@@ -920,6 +920,9 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     // Apply any manually-set column headers stored in the rule
     this.#applyManualHeaders(rule);
 
+    // Apply any column merges defined for this rule
+    this.#applyColumnMerges(rule);
+
     // Apply any column splits defined for this rule
     this.#applyColumnSplits(rule);
 
@@ -954,6 +957,11 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       // Apply new column names
       headers.forEach((h, i) => { if (table.columns[i]) table.columns[i].header = h; });
     }
+  }
+
+  #applyColumnMerges(rule) {
+    if (!this._scanData?.tables || !rule?.columnMerges) return;
+    applyColumnMerges(this._scanData.tables, rule.columnMerges);
   }
 
   #applyColumnSplits(rule) {
@@ -1049,6 +1057,37 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
           action: () => {
             delete rule.columnSplits[tableId][col];
             if (!Object.keys(rule.columnSplits[tableId]).length) delete rule.columnSplits[tableId];
+            this.#schedulePreview();
+          }
+        });
+      }
+      const table   = this._scanData?.tables?.find(t => t.id === tableId);
+      const colIdx  = table?.columns.findIndex(c => c.header === col) ?? -1;
+      const nextCol = colIdx >= 0 && colIdx < (table.columns.length - 1) ? table.columns[colIdx + 1].header : null;
+      const hasMerge = rule.columnMerges?.[tableId]?.some(([a, b]) => {
+        return a === col || b === col || [a, b].filter(h => h.trim()).join(' ') === col;
+      });
+      if (nextCol !== null) {
+        menuItems.push({
+          icon: 'fa-compress-alt',
+          label: `Merge "${col || '(unlabeled)'}" → "${nextCol || '(unlabeled)'}"`,
+          action: () => {
+            if (!rule.columnMerges) rule.columnMerges = {};
+            if (!rule.columnMerges[tableId]) rule.columnMerges[tableId] = [];
+            rule.columnMerges[tableId].push([col, nextCol]);
+            this.#schedulePreview();
+          }
+        });
+      }
+      if (hasMerge) {
+        menuItems.push({
+          icon: 'fa-expand-alt',
+          label: `Remove Merge: "${col || '(unlabeled)'}"`,
+          action: () => {
+            rule.columnMerges[tableId] = rule.columnMerges[tableId].filter(([a, b]) => {
+              return a !== col && b !== col && [a, b].filter(h => h.trim()).join(' ') !== col;
+            });
+            if (!rule.columnMerges[tableId].length) delete rule.columnMerges[tableId];
             this.#schedulePreview();
           }
         });
