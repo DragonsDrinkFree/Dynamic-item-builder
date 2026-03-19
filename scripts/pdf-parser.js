@@ -388,7 +388,108 @@ export function detectTables(items, rowThreshold = 8) {
     });
   }
 
+  // Merge consecutive tables that share the same column count into one table.
+  // The header row of each merged-in table is injected as a section-label data
+  // row so it remains visible in the scan preview and can be filtered by a
+  // skipPattern if needed.
+  if (tables.length > 1) {
+    const merged = [];
+    for (const table of tables) {
+      const prev = merged[merged.length - 1];
+      if (prev && prev.columns.length === table.columns.length) {
+        // Inject the second table's header as a section-label row
+        prev.rows.push({
+          cells:         table.columns.map((col, i) => ({ column: prev.columns[i].header, value: col.header ?? '' })),
+          rawText:       table.columns.map(c => c.header ?? '').join(' '),
+          _sectionHeader: true
+        });
+        // Append data rows remapped to the first table's column names
+        for (const row of table.rows) {
+          prev.rows.push({
+            ...row,
+            cells: row.cells.map((cell, i) => ({ ...cell, column: prev.columns[i]?.header ?? cell.column }))
+          });
+        }
+      } else {
+        merged.push({ ...table });
+      }
+    }
+    merged.forEach((t, i) => { t.id = `tbl-${i}`; });
+    return { tables: merged, proseRows };
+  }
+
   return { tables, proseRows };
+}
+
+/**
+ * Apply manual column header overrides to a set of tables (in-place).
+ * Mirrors DynamicItemBuilderApp.#applyManualHeaders so the rule engine can
+ * use the same renamed column names when extracting attributes.
+ */
+export function applyManualHeaderOverrides(tables, manualHeaders) {
+  if (!tables || !manualHeaders) return;
+  for (const table of tables) {
+    const override = manualHeaders[table.id];
+    if (!override?.headers?.length) continue;
+    const { headers, originalHeaders } = override;
+    for (const row of table.rows) {
+      row.cells = row.cells.map((cell, i) => ({ ...cell, column: headers[i] ?? cell.column }));
+    }
+    if (originalHeaders?.some(h => h)) {
+      table.rows.unshift({
+        cells:     headers.map((h, i) => ({ column: h, value: originalHeaders[i] ?? '' })),
+        rawText:   originalHeaders.join(' '),
+        _injected: true
+      });
+    }
+    headers.forEach((h, i) => { if (table.columns[i]) table.columns[i].header = h; });
+  }
+}
+
+/**
+ * Split columns in-place according to rule.columnSplits.
+ *
+ * columnSplits: { [tableId]: { [columnHeader]: delimiter } }
+ *
+ * For each matching column the cell value is split by the delimiter.
+ * The maximum number of parts across all rows in that column determines how
+ * many sub-columns are created (e.g. "10/30/40" → 3 columns).
+ * Rows with fewer parts have their last value duplicated to fill remaining
+ * columns (so "None" with 2-part max → ["None", "None"]).
+ */
+export function applyColumnSplits(tables, columnSplits) {
+  if (!tables || !columnSplits) return;
+  for (const table of tables) {
+    const tableSplits = columnSplits[table.id];
+    if (!tableSplits) continue;
+    for (const [colHeader, delimiter] of Object.entries(tableSplits)) {
+      const colIdx = table.columns.findIndex(c => c.header === colHeader);
+      if (colIdx === -1) continue;
+
+      // Determine max number of parts across all rows
+      let maxParts = 1;
+      for (const row of table.rows) {
+        const val = row.cells[colIdx]?.value ?? '';
+        if (val === '') continue;
+        maxParts = Math.max(maxParts, val.split(delimiter).length);
+      }
+      if (maxParts <= 1) continue;
+
+      // Build new column descriptors
+      const newCols = Array.from({ length: maxParts }, (_, i) => ({ header: `${colHeader} ${i + 1}` }));
+      table.columns.splice(colIdx, 1, ...newCols);
+
+      // Split each row's cell; duplicate last value when fewer parts than max
+      for (const row of table.rows) {
+        const val = row.cells[colIdx]?.value ?? '';
+        const parts = val === ''
+          ? Array(maxParts).fill('')
+          : val.split(delimiter).map(p => p.trim());
+        while (parts.length < maxParts) parts.push(parts[parts.length - 1] ?? '');
+        row.cells.splice(colIdx, 1, ...parts.map((p, i) => ({ column: newCols[i].header, value: p })));
+      }
+    }
+  }
 }
 
 /**

@@ -681,6 +681,14 @@
   outline: 1px solid var(--dib-border-hi);
 }
 
+/* Section-header rows (merged table separators) */
+.scan-section-header-row .scan-data-cell {
+  background: var(--dib-bg-3);
+  color: var(--dib-accent);
+  font-style: italic;
+  border-top: 1px solid var(--dib-border-hi);
+}
+
 /* Prose rows */
 .scan-prose-section {
   flex-shrink: 0;

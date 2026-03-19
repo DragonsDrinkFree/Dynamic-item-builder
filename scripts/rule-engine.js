@@ -3,7 +3,7 @@
  * an array of detected items: [{ name, [foundryField]: value, ... }]
  */
 
-import { extractPages, parsePageString, mergePageItems, detectColumns, mapRowsToCells, detectTables } from './pdf-parser.js';
+import { extractPages, parsePageString, mergePageItems, detectColumns, mapRowsToCells, detectTables, applyManualHeaderOverrides, applyColumnSplits } from './pdf-parser.js';
 
 /**
  * Apply a rule to a loaded PDF document.
@@ -41,9 +41,10 @@ function applyRuleWithRegions(rule, pages, regions) {
     groups.get(region.group).push(region);
   }
 
-  const skipRe  = rule.skipPattern?.trim() ? safeRegex(rule.skipPattern) : null;
-  const results = [];
-
+  // Collect all tables across groups then re-index — mirrors
+  // DynamicItemBuilderApp.#scanTableRegions so table IDs stay consistent
+  // between the Table Preview and the extraction path.
+  const allTables = [];
   for (const [, groupRegions] of groups) {
     let yOffset    = 0;
     const groupItems = [];
@@ -66,29 +67,39 @@ function applyRuleWithRegions(rule, pages, regions) {
     }
 
     if (!groupItems.length) continue;
+    allTables.push(...detectTables(groupItems).tables);
+  }
 
-    // Use detectTables (identical to Table Preview) for consistent column layout
-    const scanResult = detectTables(groupItems);
+  // Re-index (must match DynamicItemBuilderApp.#scanTableRegions)
+  allTables.forEach((t, i) => { t.id = `tbl-${i}`; });
 
-    for (const table of scanResult.tables) {
-      // Build index column map for _colN fallback keys
-      const colIndexMap = {};
-      table.columns.forEach((col, i) => { colIndexMap[col.header] = i; });
+  // Apply the same transforms as the Table Preview so attribute mappings align
+  applyManualHeaderOverrides(allTables, rule.manualHeaders);
+  applyColumnSplits(allTables, rule.columnSplits);
 
-      for (const row of table.rows) {
-        const cells = {};
-        for (const cell of row.cells) {
-          cells[cell.column] = cell.value;
-          cells[`_col${colIndexMap[cell.column] ?? 0}`] = cell.value;
-        }
+  const skipRe  = rule.skipPattern?.trim() ? safeRegex(rule.skipPattern) : null;
+  const results = [];
 
-        const rowText = row.rawText ?? Object.values(cells).join(' ').trim();
-        if (!rowText.trim()) continue;
-        if (skipRe?.test(rowText)) continue;
+  for (const table of allTables) {
+    const colIndexMap = {};
+    table.columns.forEach((col, i) => { colIndexMap[col.header] = i; });
 
-        const item = extractAttributes(cells, rule.attributes, rule);
-        if (item) results.push(item);
+    for (const row of table.rows) {
+      // Skip injected header rows and section-label rows added by merge/split logic
+      if (row._injected || row._sectionHeader) continue;
+
+      const cells = {};
+      for (const cell of row.cells) {
+        cells[cell.column] = cell.value;
+        cells[`_col${colIndexMap[cell.column] ?? 0}`] = cell.value;
       }
+
+      const rowText = row.rawText ?? Object.values(cells).join(' ').trim();
+      if (!rowText.trim()) continue;
+      if (skipRe?.test(rowText)) continue;
+
+      const item = extractAttributes(cells, rule.attributes, rule);
+      if (item) results.push(item);
     }
   }
 

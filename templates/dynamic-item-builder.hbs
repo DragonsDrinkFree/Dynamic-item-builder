@@ -365,7 +365,6 @@
           <span class="dib-loading"><i class="fas fa-spinner fa-spin"></i></span>
           {{/if}}
         </button>
-        <div class="dib-tab-sep"></div>
         <button class="dib-tab {{#if previewTabActive}}active{{/if}} {{#if previewHasContent}}dib-tab-has-preview{{/if}}" data-tab="preview">
           <i class="fas fa-eye"></i>
           <span>Items Preview</span>
@@ -401,6 +400,7 @@
                       <th class="scan-cell scan-header-cell dib-col-status-{{this.status}}"
                           data-scan="header-cell"
                           data-column="{{this.header}}"
+                          data-table-id="{{../id}}"
                           title="Click to map or set header pattern">
                         {{#if this.header}}{{this.header}}{{else}}<em class="dib-unlabeled">(unlabeled)</em>{{/if}}
                       </th>
@@ -409,7 +409,7 @@
                   </thead>
                   <tbody>
                     {{#each this.rows}}
-                    <tr>
+                    <tr{{#if this._sectionHeader}} class="scan-section-header-row"{{/if}}>
                       {{#each this.cells}}
                       <td class="scan-cell scan-data-cell"
                           data-scan="data-cell"

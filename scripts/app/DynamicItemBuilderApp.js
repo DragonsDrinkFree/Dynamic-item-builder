@@ -8,7 +8,7 @@
 
 import {
   loadPDF, extractPages, parsePageString, mergePageItems,
-  detectTables, renderPageToCanvas
+  detectTables, renderPageToCanvas, applyColumnSplits
 } from '../pdf-parser.js';
 import { applyRule }   from '../rule-engine.js';
 import { buildItems }  from '../item-builder.js';
@@ -920,6 +920,9 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     // Apply any manually-set column headers stored in the rule
     this.#applyManualHeaders(rule);
 
+    // Apply any column splits defined for this rule
+    this.#applyColumnSplits(rule);
+
     // Auto-populate headerPattern from the first labeled column if not already set
     if (rule && !rule.headerPattern?.trim() && this._scanData?.tables?.[0]?.columns?.length) {
       const firstHeader = this._scanData.tables[0].columns.find(c => c.header)?.header;
@@ -951,6 +954,11 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       // Apply new column names
       headers.forEach((h, i) => { if (table.columns[i]) table.columns[i].header = h; });
     }
+  }
+
+  #applyColumnSplits(rule) {
+    if (!this._scanData?.tables || !rule?.columnSplits) return;
+    applyColumnSplits(this._scanData.tables, rule.columnSplits);
   }
 
   /** Filter a single page's items to those inside a region bounding box. */
@@ -1022,11 +1030,29 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     const col = (headerCell ?? dataCell)?.dataset.column;
 
     if (headerCell) {
+      const tableId = headerCell.dataset.tableId;
       menuItems.push({
         icon: 'fa-heading',
         label: `Set Header Pattern: "${col}"`,
         action: () => { rule.headerPattern = col; this.#schedulePreview(); this.render(); }
       });
+      const hasSplit = rule.columnSplits?.[tableId]?.[col];
+      menuItems.push({
+        icon: 'fa-columns',
+        label: hasSplit ? `Edit Split: "${col}" (on "${hasSplit}")` : `Split Column: "${col}"`,
+        action: () => this.#showSplitColumnPopover(event, tableId, col)
+      });
+      if (hasSplit) {
+        menuItems.push({
+          icon: 'fa-times',
+          label: `Remove Split: "${col}"`,
+          action: () => {
+            delete rule.columnSplits[tableId][col];
+            if (!Object.keys(rule.columnSplits[tableId]).length) delete rule.columnSplits[tableId];
+            this.#schedulePreview();
+          }
+        });
+      }
     }
     if (dataCell) {
       const val = dataCell.dataset.value;
@@ -1149,6 +1175,69 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       if (e.key === 'Enter')  { e.preventDefault(); save();   }
       if (e.key === 'Escape') { e.preventDefault(); cancel(); }
     }));
+
+    const closeOut = e => {
+      if (!popover.contains(e.target)) { cancel(); document.removeEventListener('pointerdown', closeOut, true); }
+    };
+    setTimeout(() => document.addEventListener('pointerdown', closeOut, true), 0);
+  }
+
+  #showSplitColumnPopover(event, tableId, col) {
+    document.querySelector('.dib-cell-popover')?.remove();
+    const rule = this.selectedRule;
+    if (!rule || !tableId || !col) return;
+
+    const existing  = rule.columnSplits?.[tableId]?.[col] ?? '';
+    const esc       = s => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+
+    const popover = document.createElement('div');
+    popover.className = 'dib-cell-popover dib-split-popover';
+    popover.innerHTML = `
+      <div class="dib-cpop-label">Split Column <em style="font-weight:400;font-size:10px;text-transform:none">"${esc(col)}"</em></div>
+      <div class="dib-hpop-col" style="margin-bottom:6px">
+        <label class="dib-hpop-label">Split on symbol</label>
+        <input type="text" class="dib-cpop-input dib-split-input" value="${esc(existing)}"
+               placeholder="e.g. /" style="width:80px;text-align:center;font-size:14px">
+        <span style="font-size:10px;color:#888;margin-top:3px;display:block">
+          Max sub-columns determined from data. Short rows duplicate their last value.
+        </span>
+      </div>
+      <div class="dib-cpop-btns">
+        <button class="dib-btn dib-btn-sm dib-btn-primary dib-cpop-save">Apply</button>
+        <button class="dib-btn dib-btn-sm dib-cpop-cancel">Cancel</button>
+      </div>`;
+    document.body.appendChild(popover);
+
+    const input = popover.querySelector('.dib-split-input');
+    const btn   = event.target.closest('[data-scan]') ?? { getBoundingClientRect: () => ({ bottom: event.clientY, left: event.clientX, top: event.clientY }) };
+    const rect  = btn.getBoundingClientRect?.() ?? { bottom: event.clientY, left: event.clientX, top: event.clientY };
+    const pw    = popover.offsetWidth  || 260;
+    const ph    = popover.offsetHeight || 120;
+    let   top   = rect.bottom + 4;
+    if (top + ph > window.innerHeight - 8) top = rect.top - ph - 4;
+    popover.style.left = `${Math.max(4, Math.min(rect.left, window.innerWidth - pw - 8))}px`;
+    popover.style.top  = `${Math.max(4, top)}px`;
+    input.focus();
+    input.select();
+
+    const save = () => {
+      const delimiter = input.value;
+      if (delimiter) {
+        if (!rule.columnSplits) rule.columnSplits = {};
+        if (!rule.columnSplits[tableId]) rule.columnSplits[tableId] = {};
+        rule.columnSplits[tableId][col] = delimiter;
+      }
+      popover.remove();
+      this.#schedulePreview();
+    };
+    const cancel = () => popover.remove();
+
+    popover.querySelector('.dib-cpop-save').addEventListener('click', save);
+    popover.querySelector('.dib-cpop-cancel').addEventListener('click', cancel);
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter')  { e.preventDefault(); save();   }
+      if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+    });
 
     const closeOut = e => {
       if (!popover.contains(e.target)) { cancel(); document.removeEventListener('pointerdown', closeOut, true); }
