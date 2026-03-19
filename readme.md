@@ -5,6 +5,8 @@ it is system agnostic, and intended to be extremely flexible, but may not be 100
 
 ## User Guide
 Included in this module is a Foundry Compendium which will act as a getting started guide. It is highly recommended you start there!
+<img width="1692" height="857" alt="image" src="https://github.com/user-attachments/assets/12978b51-111e-4264-a796-e0e879b42bf6" />
+
 
 ## Additional Features & Bug Reports
 This module has been designed from my perspective to solve as many pain points as i could anticipate based on my own use cases, but your paint points may be different. Please feel free to drop an issue if there are idea's that could make this module more flexible or more powerful.
