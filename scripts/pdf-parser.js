@@ -349,12 +349,25 @@ export function detectTables(items, rowThreshold = 8) {
   let current = null;
   for (const row of rows) {
     const kind = row.items.length >= 2 ? 'table' : 'prose';
-    // A single-item row inside an active table segment is likely a wrapped
-    // cell (e.g. "Universal\nAutopistol"). Merge it into the previous table
-    // row so it doesn't break the segment and strand the rows that follow.
+    // A single-item row inside an active table segment may be a wrapped cell
+    // (e.g. "Universal\nAutopistol") — but only if the lone item's X position
+    // overlaps an item in the previous row (same column).  A title or caption
+    // (e.g. "Weapons") centred over the table won't overlap and must fall
+    // through to the normal segment-break logic so it doesn't absorb a
+    // spanning header row into the same segment.
     if (kind === 'prose' && row.items.length === 1 && current?.kind === 'table') {
-      current.rows[current.rows.length - 1].items.push(...row.items);
-      continue;
+      const prevRow = current.rows[current.rows.length - 1];
+      const item    = row.items[0];
+      const iEnd    = item.x + (item.width ?? 0);
+      const overlaps = prevRow.items.some(pi => {
+        const piEnd = pi.x + (pi.width ?? 0);
+        return item.x <= piEnd + 20 && iEnd >= pi.x - 20;
+      });
+      if (overlaps) {
+        prevRow.items.push(...row.items);
+        continue;
+      }
+      // No column overlap — fall through to normal processing (breaks segment).
     }
     if (current?.kind === kind) {
       current.rows.push(row);
@@ -476,6 +489,39 @@ export function applyManualHeaderOverrides(tables, manualHeaders) {
  * Rows with fewer parts have their last value duplicated to fill remaining
  * columns (so "None" with 2-part max → ["None", "None"]).
  */
+/**
+ * Merge pairs of adjacent columns (in-place).
+ * columnMerges: { [tableId]: [[colHeaderA, colHeaderB], ...] }
+ * Each pair is applied in order; the left column absorbs the right column's
+ * values (non-empty values are joined with a space) and the right column is
+ * removed. The merged column header is the two names joined with a space
+ * (empty/unlabeled names are skipped).
+ */
+export function applyColumnMerges(tables, columnMerges) {
+  if (!tables || !columnMerges) return;
+  for (const table of tables) {
+    const mergeList = columnMerges[table.id];
+    if (!mergeList?.length) continue;
+    for (const [colA, colB] of mergeList) {
+      const idxA = table.columns.findIndex(c => c.header === colA);
+      const idxB = table.columns.findIndex(c => c.header === colB);
+      if (idxA === -1 || idxB === -1) continue;
+      const [iLeft, iRight] = idxA < idxB ? [idxA, idxB] : [idxB, idxA];
+      const mergedHeader = [table.columns[iLeft].header, table.columns[iRight].header]
+        .filter(h => h.trim()).join(' ');
+      table.columns[iLeft] = { ...table.columns[iLeft], header: mergedHeader };
+      table.columns.splice(iRight, 1);
+      for (const row of table.rows) {
+        const vLeft  = row.cells[iLeft]?.value  ?? '';
+        const vRight = row.cells[iRight]?.value ?? '';
+        const merged = [vLeft, vRight].filter(v => v.trim()).join(' ');
+        row.cells[iLeft] = { column: mergedHeader, value: merged };
+        row.cells.splice(iRight, 1);
+      }
+    }
+  }
+}
+
 export function applyColumnSplits(tables, columnSplits) {
   if (!tables || !columnSplits) return;
   for (const table of tables) {

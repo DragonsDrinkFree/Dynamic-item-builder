@@ -3,7 +3,7 @@
  * an array of detected items: [{ name, [foundryField]: value, ... }]
  */
 
-import { extractPages, parsePageString, mergePageItems, detectColumns, mapRowsToCells, detectTables, applyManualHeaderOverrides, applyColumnSplits } from './pdf-parser.js';
+import { extractPages, parsePageString, mergePageItems, detectColumns, mapRowsToCells, detectTables, applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits } from './pdf-parser.js';
 
 /**
  * Apply a rule to a loaded PDF document.
@@ -75,6 +75,7 @@ function applyRuleWithRegions(rule, pages, regions) {
 
   // Apply the same transforms as the Table Preview so attribute mappings align
   applyManualHeaderOverrides(allTables, rule.manualHeaders);
+  applyColumnMerges(allTables, rule.columnMerges);
   applyColumnSplits(allTables, rule.columnSplits);
 
   const skipRe  = rule.skipPattern?.trim() ? safeRegex(rule.skipPattern) : null;
