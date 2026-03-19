@@ -146,7 +146,7 @@
 ────────────────────────────────────── */
 .dib-panels {
   display: grid;
-  grid-template-columns: 190px minmax(0, 1fr) minmax(0, 1.8fr);
+  grid-template-columns: 152px minmax(0, 1fr) minmax(0, 1.6fr);
   flex: 1;
   overflow: hidden;
   min-height: 0;
@@ -381,6 +381,147 @@
   padding: 10px 0;
 }
 
+/* ── New attribute mapping section ── */
+.dib-attr-mapping-section {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--dib-border);
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--dib-bg-0);
+}
+.dib-attr-section-header {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  background: var(--dib-bg-2);
+  border-bottom: 1px solid var(--dib-border);
+  flex-shrink: 0;
+}
+.dib-attr-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--dib-text-muted);
+}
+.dib-attr-list {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  max-height: 380px;
+}
+.dib-attr-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  min-height: 28px;
+}
+.dib-attr-row:last-child { border-bottom: none; }
+.dib-attr-row:hover { background: rgba(255,255,255,0.03); }
+
+/* Status indicator dot */
+.dib-attr-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dib-attr-status-linked    .dib-attr-dot { background: var(--dib-success); }
+.dib-attr-status-suggested .dib-attr-dot { background: var(--dib-accent); }
+.dib-attr-status-none      .dib-attr-dot { background: var(--dib-danger); opacity: 0.55; }
+
+/* Attribute name button */
+.dib-attr-name-btn {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 1px 5px;
+  border-radius: 3px;
+  min-width: 80px;
+  max-width: 140px;
+  transition: background 0.1s;
+}
+.dib-attr-name-btn:hover { background: var(--dib-bg-3); }
+.dib-attr-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dib-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 130px;
+}
+.dib-attr-path {
+  font-size: 9px;
+  color: var(--dib-text-muted);
+  font-family: monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 130px;
+}
+
+/* Right-side info area */
+.dib-attr-info {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+}
+.dib-attr-col-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 3px;
+  background: rgba(50,175,90,0.15);
+  color: var(--dib-success);
+  border: 1px solid rgba(50,175,90,0.3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+.dib-attr-sugg-col {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--dib-accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 130px;
+}
+.dib-attr-accept-btn {
+  flex-shrink: 0;
+  color: var(--dib-accent) !important;
+  border-color: rgba(196,154,60,0.5) !important;
+}
+.dib-attr-in-preview {
+  flex-shrink: 0;
+  color: #a0c4ff;
+  font-size: 11px;
+  opacity: 0.85;
+}
+.dib-attr-empty {
+  font-size: 12px;
+  color: var(--dib-text-muted);
+  text-align: center;
+  padding: 16px;
+  font-style: italic;
+}
+
 /* ──────────────────────────────────────
    TABS (right panel)
 ────────────────────────────────────── */
@@ -427,6 +568,19 @@
 .dib-tab.active {
   color: #4caf50;
   border-bottom-color: #4caf50;
+}
+
+/* Items Preview tab — blue text + gold bottom border when populated */
+.dib-tab.dib-tab-has-preview {
+  color: #4a9eff;
+  border-bottom: 2px solid var(--dib-accent);
+  text-shadow: 0 0 8px rgba(74, 158, 255, 0.4);
+}
+.dib-tab.dib-tab-has-preview.active {
+  color: #4a9eff;
+  border-bottom-color: #4a9eff;
+  box-shadow: inset 0 -2px 0 var(--dib-accent);
+  text-shadow: 0 0 10px rgba(74, 158, 255, 0.6);
 }
 
 .dib-tab-badge {
@@ -527,6 +681,14 @@
   outline: 1px solid var(--dib-border-hi);
 }
 
+/* Section-header rows (merged table separators) */
+.scan-section-header-row .scan-data-cell {
+  background: var(--dib-bg-3);
+  color: var(--dib-accent);
+  font-style: italic;
+  border-top: 1px solid var(--dib-border-hi);
+}
+
 /* Prose rows */
 .scan-prose-section {
   flex-shrink: 0;
@@ -623,80 +785,30 @@
   letter-spacing: 0.07em;
   color: #c49a3c;
 }
-
-/* ──────────────────────────────────────
-   PDF TEXT SCAN
-────────────────────────────────────── */
-.text-scan-content {
-  flex: 1;
-  min-height: 0;
+.dib-ctx-filter {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 4px 8px 2px;
+  padding: 4px 8px;
+  background: #1a1a22;
+  border: 1px solid #424248;
+  border-radius: 4px;
+  color: #d4d4d8;
+  font-size: 12px;
+  outline: none;
+  box-sizing: border-box;
+}
+.dib-ctx-filter:focus {
+  border-color: var(--dib-accent);
+}
+.dib-ctx-filterable-list {
+  max-height: 220px;
   overflow-y: auto;
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  overflow-x: hidden;
 }
+.dib-ctx-filterable-list::-webkit-scrollbar { width: 4px; }
+.dib-ctx-filterable-list::-webkit-scrollbar-thumb { background: #424248; border-radius: 2px; }
 
-.text-section {
-  flex-shrink: 0;
-  border: 1px solid var(--dib-border);
-  border-radius: 5px;
-  overflow: hidden;
-}
-
-.text-section-header {
-  padding: 5px 10px;
-  background: var(--dib-bg-2);
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--dib-accent);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  border-bottom: 1px solid var(--dib-border);
-}
-
-.text-section-intro {
-  padding: 4px 10px;
-  font-size: 11px;
-  color: var(--dib-text-muted);
-  font-style: italic;
-  background: var(--dib-bg-0);
-  border-bottom: 1px solid var(--dib-border);
-  line-height: 1.5;
-}
-
-.text-entry {
-  display: grid;
-  grid-template-columns: minmax(80px, 30%) 1fr;
-  gap: 0 8px;
-  padding: 4px 10px;
-  border-top: 1px solid var(--dib-border);
-  cursor: pointer;
-  font-size: 11px;
-  transition: background 0.1s;
-}
-.text-entry:first-of-type { border-top: none; }
-.text-entry:hover { background: var(--dib-bg-3); }
-
-.text-entry-name {
-  font-weight: 700;
-  color: var(--dib-text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  align-self: start;
-  padding-top: 1px;
-}
-
-.text-entry-desc {
-  color: var(--dib-text-muted);
-  line-height: 1.45;
-  /* clamp to ~3 lines */
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
 
 /* ──────────────────────────────────────
    PREVIEW (right panel)
@@ -963,3 +1075,606 @@ div.ignore-tr {
 .dib-open-btn:hover {
   background: var(--color-hover, rgba(255,255,255,0.06));
 }
+
+/* ============================================================
+   PDF PLANNER — center panel additions
+   ============================================================ */
+
+/* Shared top bar — 2-row strip above center tabs */
+.dib-planner-topbar {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--dib-border);
+  background: var(--dib-bg-2);
+}
+.dib-topbar-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+}
+.dib-topbar-row + .dib-topbar-row {
+  border-top: 1px solid rgba(255,255,255,0.05);
+}
+.dib-topbar-input {
+  flex: 1;
+  padding: 3px 6px;
+  font-size: 12px;
+  background: var(--dib-bg-input);
+  border: 1px solid var(--dib-border);
+  border-radius: 3px;
+  color: var(--dib-text);
+  min-width: 0;
+}
+.dib-topbar-input:focus { border-color: var(--dib-border-hi); outline: none; }
+.dib-topbar-input::placeholder { color: var(--dib-text-muted); }
+.dib-topbar-select {
+  flex: 0 0 130px;
+  padding: 3px 6px;
+  font-size: 12px;
+  background: var(--dib-bg-input);
+  border: 1px solid var(--dib-border);
+  border-radius: 3px;
+  color: var(--dib-text);
+}
+.dib-topbar-select-wide {
+  flex: 0 0 160px;
+}
+
+/* Center tab bar */
+.dib-center-tab-bar {
+  display: flex;
+  flex-shrink: 0;
+  border-bottom: 2px solid var(--dib-border);
+  background: var(--dib-bg-2);
+  padding: 0 8px;
+  gap: 2px;
+}
+
+/* Planner toolbar (page nav + draw tools) */
+.dib-planner-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--dib-border);
+  background: var(--dib-bg-2);
+  flex-wrap: wrap;
+}
+
+.dib-planner-page-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.dib-planner-page-label {
+  font-size: 0.82em;
+  min-width: 48px;
+  text-align: center;
+  color: var(--dib-text-muted);
+}
+
+.dib-planner-tools {
+  display: flex;
+  gap: 4px;
+}
+
+/* Draw mode toggle buttons */
+.dib-draw-btn { opacity: 0.7; }
+.dib-draw-btn:hover { opacity: 1; }
+.dib-draw-btn.active {
+  opacity: 1;
+  background: rgba(76,175,80,0.15);
+  border-color: #4caf50;
+  color: #4caf50;
+}
+/* Planner content: canvas + sidebar side by side */
+.dib-planner-content {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Canvas scroll area */
+.dib-planner-canvas-wrap {
+  flex: 1;
+  overflow: auto;
+  padding: 10px;
+  background: #0e0e12;
+}
+.dib-planner-canvas-wrap.draw-active { cursor: crosshair; }
+
+/* PDF viewport container (positions overlay on top of canvas) */
+.dib-pdf-viewport {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+  box-shadow: 0 2px 16px rgba(0,0,0,0.7);
+}
+
+#dib-pdf-canvas {
+  display: block;
+}
+
+/* Region overlay (fills the viewport exactly) */
+.dib-region-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none; /* overlay itself is transparent; children opt in */
+}
+
+/* Region rectangles */
+.dib-region {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid;
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  overflow: hidden;
+  min-width: 6px;
+  min-height: 6px;
+}
+.dib-region-table {
+  border-color: rgba(76,175,80,0.9);
+  background: rgba(76,175,80,0.10);
+}
+.dib-region-drawing {
+  border-style: dashed;
+  pointer-events: none;
+  opacity: 0.75;
+}
+
+.dib-region-label {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 4px;
+  background: rgba(0,0,0,0.65);
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 80%;
+  line-height: 1.4;
+}
+
+.dib-region-delete {
+  background: rgba(0,0,0,0.65);
+  border: none;
+  color: #f77;
+  padding: 1px 4px;
+  cursor: pointer;
+  font-size: 9px;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+.dib-region-delete:hover { background: rgba(180,0,0,0.8); color: #fff; }
+
+/* Region sidebar */
+.dib-region-sidebar {
+  width: 98px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--dib-border);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--dib-bg-1);
+}
+
+.dib-region-sidebar-header {
+  font-size: 0.68em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--dib-text-muted);
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--dib-border);
+  flex-shrink: 0;
+  background: var(--dib-bg-2);
+}
+
+.dib-region-list-item {
+  padding: 3px 5px;
+  border-bottom: 1px solid var(--dib-border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-left: 3px solid transparent;
+}
+.dib-region-item-table { border-left-color: #4caf50; }
+.dib-region-item-text  { border-left-color: #2196f3; }
+
+.dib-region-item-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.dib-region-type-badge {
+  font-size: 0;           /* hide text — just a colored pip */
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dib-region-label-input {
+  flex: 1;
+  font-size: 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: inherit;
+  padding: 1px 3px;
+  min-width: 0;
+  border-radius: 2px;
+}
+.dib-region-label-input:focus {
+  border-color: var(--dib-border-hi);
+  background: var(--dib-bg-input);
+  outline: none;
+}
+
+.dib-region-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--dib-text-muted);
+}
+
+.dib-region-page-tag {
+  flex-shrink: 0;
+  font-size: 8px;
+  background: var(--dib-bg-3);
+  padding: 1px 3px;
+  border-radius: 2px;
+}
+
+.dib-region-group-input {
+  flex: 1;
+  font-size: 9px;
+  background: var(--dib-bg-input);
+  border: 1px solid var(--dib-border);
+  color: var(--dib-text-muted);
+  padding: 1px 3px;
+  border-radius: 2px;
+  min-width: 0;
+}
+.dib-region-group-input:focus {
+  border-color: var(--dib-border-hi);
+  color: var(--dib-text);
+  outline: none;
+}
+
+.dib-region-del-btn {
+  flex-shrink: 0;
+  padding: 1px 4px !important;
+  font-size: 9px !important;
+}
+
+.dib-region-empty {
+  font-size: 0.78em;
+  color: var(--dib-text-muted);
+  padding: 16px 12px;
+  text-align: center;
+  font-style: italic;
+  line-height: 1.6;
+}
+.dib-region-empty i { display: block; font-size: 1.6em; margin-bottom: 6px; opacity: 0.4; }
+
+
+/* Unlabeled column header style */
+.dib-unlabeled {
+  color: var(--dib-text-muted);
+  font-style: italic;
+  font-size: 0.85em;
+}
+
+/* Item Planner tab — make rule editor inner scrollable within tab panel */
+#dib-center-item-planner.dib-tab-panel.active {
+  overflow-y: auto;
+}
+
+/* ── Table Preview — header color coding by link status ── */
+.scan-header-cell.dib-col-status-none {
+  background: rgba(200, 55, 55, 0.18);
+  border-bottom: 2px solid #c04444;
+}
+.scan-header-cell.dib-col-status-suggested {
+  background: rgba(196, 154, 60, 0.22);
+  border-bottom: 2px solid var(--dib-accent);
+}
+.scan-header-cell.dib-col-status-linked {
+  background: rgba(50, 175, 90, 0.18);
+  border-bottom: 2px solid var(--dib-success);
+}
+
+/* ── Suggested Links tab ── */
+.dib-suggestion-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: var(--dib-bg-2);
+  border-bottom: 1px solid var(--dib-border);
+  flex-shrink: 0;
+}
+.dib-suggestion-list {
+  overflow-y: auto;
+  flex: 1;
+}
+.dib-suggestion-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  font-size: 0.82em;
+}
+.dib-suggestion-row:hover:not(.dib-sugg-done) {
+  background: rgba(255,255,255,0.04);
+}
+.dib-suggestion-row.dib-sugg-done {
+  opacity: 0.45;
+}
+.dib-sugg-col {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.dib-sugg-header {
+  font-weight: 600;
+  color: var(--dib-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 110px;
+  flex-shrink: 0;
+}
+.dib-sugg-arrow {
+  color: var(--dib-text-muted);
+  flex-shrink: 0;
+}
+.dib-sugg-field {
+  font-family: monospace;
+  font-size: 0.9em;
+  color: #7ab0d4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dib-sugg-score-badge {
+  font-size: 0.72em;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.dib-sugg-high       { background: rgba(50, 175, 90, 0.25);  color: #80e8a0; }
+.dib-sugg-med        { background: rgba(196, 154, 60, 0.28); color: #e8c860; }
+.dib-sugg-low        { background: rgba(120, 120, 130, 0.25); color: #aaaabc; }
+.dib-sugg-done-badge { background: rgba(40, 120, 200, 0.25); color: #80aee0; }
+.dib-sugg-done-icon  { color: var(--dib-success); flex-shrink: 0; font-size: 0.9em; }
+
+/* Tab badge colour variant for suggested links */
+.dib-tab-badge-sugg {
+  background: rgba(196, 154, 60, 0.30);
+  color: var(--dib-accent);
+}
+
+/* Suggested Links tab panel — flex column to let list scroll */
+#dib-tab-suggested.dib-tab-panel.active {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ──────────────────────────────────────
+   ITEM PREVIEW — selection column & cell overrides
+────────────────────────────────────── */
+.preview-sel-th {
+  width: 18px;
+  min-width: 18px;
+  padding: 0;
+  border: 1px solid var(--dib-border);
+  background: var(--dib-bg-2);
+}
+
+.dib-sel-cell {
+  width: 18px;
+  min-width: 18px;
+  padding: 0;
+  border: 1px solid var(--dib-border);
+  cursor: pointer;
+  position: relative;
+  background: var(--dib-bg-0);
+  transition: background 0.1s;
+}
+.dib-sel-cell:hover {
+  background: var(--dib-bg-3);
+}
+/* Show a small dot when the row is selected */
+.dib-row-selected .dib-sel-cell {
+  background: rgba(76, 175, 80, 0.2);
+}
+.dib-row-selected .dib-sel-cell::after {
+  content: '';
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dib-success);
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+/* Header cells: clickable indicator */
+.preview-th {
+  cursor: pointer;
+  user-select: none;
+}
+.preview-th:hover {
+  background: var(--dib-bg-3);
+  outline: 1px solid var(--dib-accent);
+  outline-offset: -1px;
+  color: var(--dib-accent);
+}
+/* Manual (unlinked) preview columns */
+.preview-th.dib-col-manual {
+  color: #a0c4ff;
+  border-bottom: 2px dashed rgba(160, 196, 255, 0.5);
+  font-style: italic;
+}
+.preview-th.dib-col-manual::after {
+  content: ' ✎';
+  font-size: 0.75em;
+  opacity: 0.7;
+}
+
+/* Data cells: gold border on hover, green border when overridden, blue when selected */
+.preview-td {
+  cursor: pointer;
+}
+.preview-td:hover {
+  outline: 1px solid var(--dib-accent);
+  outline-offset: -1px;
+}
+.preview-td.dib-cell-overridden {
+  outline: 1px solid var(--dib-success);
+  outline-offset: -1px;
+}
+.preview-td.dib-cell-overridden:hover {
+  outline: 2px solid var(--dib-success);
+  outline-offset: -1px;
+}
+.preview-td.dib-cell-selected {
+  background: rgba(74, 158, 255, 0.18) !important;
+  outline: 1px solid #4a9eff;
+  outline-offset: -1px;
+}
+.preview-td.dib-cell-selected:hover {
+  outline: 2px solid #4a9eff;
+}
+
+/* ── Test Run — error highlighting ── */
+.preview-tr.dib-row-error > .dib-sel-cell {
+  background: rgba(224, 85, 85, 0.25);
+}
+.preview-tr.dib-row-error > .dib-sel-cell::after {
+  background: #e05555;
+}
+.preview-tr.dib-row-error > td.preview-td:not(.dib-cell-error) {
+  background: rgba(224, 85, 85, 0.07);
+}
+.preview-td.dib-cell-error {
+  background: rgba(224, 85, 85, 0.40) !important;
+  outline: 1px solid #e05555;
+  outline-offset: -1px;
+  cursor: help;
+}
+.preview-td.dib-cell-error:hover {
+  background: rgba(224, 85, 85, 0.58) !important;
+  outline: 2px solid #e05555;
+}
+
+/* Test Run button */
+.dib-toolbar-sep {
+  flex: 1;
+}
+.dib-btn-test {
+  border-color: #7a4fc0;
+  color: #b380ff;
+}
+.dib-btn-test:hover:not(:disabled) {
+  background: rgba(122, 79, 192, 0.18);
+  border-color: #b380ff;
+}
+
+/* ── Cell override popover ── */
+.dib-cell-popover {
+  position: fixed;
+  z-index: 10001;
+  min-width: 220px;
+  background: #2a2a2e;
+  border: 1px solid #606068;
+  border-radius: 6px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.85);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dib-cpop-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #9494a0;
+}
+.dib-cpop-input {
+  width: 100%;
+  padding: 5px 8px;
+  background: #1a1a1e;
+  border: 1px solid #424248;
+  border-radius: 4px;
+  color: #e8e8ec;
+  font-size: 13px;
+  box-sizing: border-box;
+  outline: none;
+}
+.dib-cpop-input:focus {
+  border-color: #c49a3c;
+}
+.dib-cpop-btns {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+/* Set Headers popover */
+.dib-headers-popover {
+  min-width: 300px;
+  max-width: min(700px, 90vw);
+}
+.dib-hpop-inputs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.dib-hpop-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 80px;
+  flex: 1 1 80px;
+}
+.dib-hpop-label {
+  font-size: 10px;
+  color: var(--dib-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.dib-hpop-input {
+  font-size: 12px !important;
+  padding: 3px 6px !important;
+}
+/* Set Headers button in scan table label */
+.scan-table-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dib-set-headers-btn {
+  margin-left: auto;
+  opacity: 0.7;
+}
+.dib-set-headers-btn:hover { opacity: 1; }

@@ -1,14 +1,17 @@
 /**
- * DynamicItemBuilderApp — main three-panel ApplicationV2 UI.
+ * DynamicItemBuilderApp — three-panel ApplicationV2 UI.
  *
- * Left panel  : rule list
- * Center panel: rule editor (page range, item type, content type, attributes)
- * Right panel : live item preview
+ * Left panel   : rule list
+ * Center panel : planning — PDF Planner (canvas + region painter) | Item Planner (rule editor)
+ * Right panel  : previews — Table Preview | Text Preview | Item Preview
  */
 
-import { loadPDF, extractPages, parsePageString, mergePageItems, detectTables, detectTextSections } from '../pdf-parser.js';
-import { applyRule } from '../rule-engine.js';
-import { buildItems } from '../item-builder.js';
+import {
+  loadPDF, extractPages, parsePageString, mergePageItems,
+  detectTables, renderPageToCanvas, applyColumnSplits
+} from '../pdf-parser.js';
+import { applyRule }   from '../rule-engine.js';
+import { buildItems }  from '../item-builder.js';
 
 const { ApplicationV2, HandlebarsApplicationMixin } = foundry.applications.api;
 
@@ -25,17 +28,23 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     },
     position: { width: 1700, height: 860 },
     actions: {
-      addRule:         DynamicItemBuilderApp.#addRule,
-      deleteRule:      DynamicItemBuilderApp.#deleteRule,
-      selectRule:      DynamicItemBuilderApp.#selectRule,
-      duplicateRule:   DynamicItemBuilderApp.#duplicateRule,
-      addAttribute:    DynamicItemBuilderApp.#addAttribute,
-      deleteAttribute: DynamicItemBuilderApp.#deleteAttribute,
-      buildItems:      DynamicItemBuilderApp.#buildItems,
-      exportRules:     DynamicItemBuilderApp.#exportRules,
-      importRules:     DynamicItemBuilderApp.#importRules,
-      loadPdf:         DynamicItemBuilderApp.#loadPdfDialog,
-      refreshPreview:  DynamicItemBuilderApp.#refreshPreview
+      addRule:             DynamicItemBuilderApp.#addRule,
+      deleteRule:          DynamicItemBuilderApp.#deleteRule,
+      selectRule:          DynamicItemBuilderApp.#selectRule,
+      duplicateRule:       DynamicItemBuilderApp.#duplicateRule,
+      addAttribute:        DynamicItemBuilderApp.#addAttribute,
+      deleteAttribute:     DynamicItemBuilderApp.#deleteAttribute,
+      deleteRegion:        DynamicItemBuilderApp.#deleteRegion,
+      autoDetectRegions:   DynamicItemBuilderApp.#autoDetectRegions,
+      buildItems:          DynamicItemBuilderApp.#buildItems,
+      exportRules:         DynamicItemBuilderApp.#exportRules,
+      importRules:         DynamicItemBuilderApp.#importRules,
+      loadPdf:             DynamicItemBuilderApp.#loadPdfDialog,
+      refreshPreview:      DynamicItemBuilderApp.#refreshPreview,
+      openAttributeMenu:   DynamicItemBuilderApp.#openAttributeMenu,
+      acceptSuggestion:    DynamicItemBuilderApp.#acceptSuggestion,
+      linkAllSuggestions:  DynamicItemBuilderApp.#linkAllSuggestions,
+      testRun:             DynamicItemBuilderApp.#testRun
     }
   };
 
@@ -51,11 +60,11 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
   // -------------------------------------------------------------------------
 
   /** @type {Object|null} PDF.js document wrapper */
-  _pdf = null;
-  _pdfName = '';
+  _pdf      = null;
+  _pdfName  = '';
   _pdfPages = 0;
 
-  /** @type {Array<RuleObject>} */
+  /** @type {Array} */
   _rules = [];
 
   /** @type {string|null} */
@@ -64,38 +73,64 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
   /** @type {Object<string, Array>} rule.id → detected items */
   _preview = {};
 
-  /** @type {boolean} preview is currently being computed */
   _previewLoading = false;
 
-  /** @type {string|null} ID of selected Item folder for item creation */
+  /** @type {string|null} Global default destination folder for all rules */
   _selectedFolderId = null;
 
-  /** @type {Object|null} Result of detectTables() for the current rule's pages */
+  /** @type {Object|null} detectTables() result for current rule */
   _scanData = null;
 
-  /** @type {Object|null} Result of detectTextSections() for the current rule's pages */
-  _textData = null;
+  // ── Tab state ──────────────────────────────────────────────────────────────
 
-  /** @type {'tables'|'text'|'preview'} Active tab in the right panel */
-  _activeTab = 'tables';
+  /** @type {'planner'|'item-planner'} */
+  _centerTab = 'planner';
 
-  /** @type {Set<string>} Keys of selected rows in the preview list */
+  /** @type {'tables'|'preview'} */
+  _rightTab = 'tables';
+
+  // ── PDF Planner state ──────────────────────────────────────────────────────
+
+  /** @type {Object<string, number>} rule.id → current planner page for that rule */
+  _plannerPageByRule = {};
+
+  /** Per-rule planner page — automatically scoped to the selected rule. */
+  get _plannerPage()    { return this._plannerPageByRule[this._selectedRuleId] ?? 1; }
+  set _plannerPage(v)   { if (this._selectedRuleId) this._plannerPageByRule[this._selectedRuleId] = v; }
+
+  /** @type {null|'table'|'text'} Active drawing mode */
+  _drawMode = null;
+
+  /** @type {number} Actual render scale (pixels per PDF unit) — set on each canvas render */
+  _plannerScale = 1.0;
+
+  /** @type {{x,y}|null} Draw start point in PDF coordinates */
+  _drawStart = null;
+
+  /** @type {{x,y,w,h}|null} In-progress rectangle in PDF coordinates */
+  _drawRect = null;
+
+  // ── Preview / ignore selection ─────────────────────────────────────────────
+
   _previewSel = new Set();
-
-  /** @type {Set<string>} Keys of selected rows in the ignore list */
-  _ignoreSel = new Set();
-
-  /** @type {string|null} Last clicked key in preview (for shift-range) */
+  _ignoreSel  = new Set();
   _lastPreviewClickKey = null;
+  _lastIgnoreClickKey  = null;
 
-  /** @type {string|null} Last clicked key in ignore (for shift-range) */
-  _lastIgnoreClickKey = null;
+  /** @type {Object} Keyed [ruleId][dibKey][field] — value overrides for preview cells */
+  _cellOverrides = {};
 
-  /**
-   * Cached attribute paths for the current item type — kept in sync so the
-   * context menu can use them without an async call.
-   * @type {Array<{path,label}>}
-   */
+  /** @type {Object} Keyed [ruleId][dibKey][field|'_row'] — test-run validation errors */
+  _testErrors = {};
+
+  /** @type {Array<{ruleId,dibKey,field}>} Currently highlighted column cells */
+  _cellSel       = [];
+  _cellSelField  = null;
+  _cellSelRuleId = null;
+  _lastCellKey   = null;
+  _wasCellDrag   = false;
+
+  /** @type {Array<{path,label}>} */
   _cachedAttributePaths = [];
 
   /** @type {number|null} */
@@ -110,40 +145,44 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
   // -------------------------------------------------------------------------
 
   async _prepareContext(options) {
-    const rule = this.selectedRule;
-    const itemTypes = getSystemItemTypes();
+    const rule         = this.selectedRule;
+    const itemTypes    = getSystemItemTypes();
     const attributePaths = rule ? await getItemAttributePaths(rule.itemType) : [];
 
-    // Build preview summary — include column headers and flatten item values
-    // so the template can render a proper table without needing deep-path helpers.
+    // Build preview summary
     const previewSummary = this._rules.map(r => {
       const cols = r.attributes
         .filter(a => a.foundryField)
-        .map(a => ({
-          field: a.foundryField,
-          label: a.foundryField.split('.').pop()
-        }));
+        .map(a => ({ field: a.foundryField, label: a.foundryField.split('.').pop() }));
+      // Append manual (unlinked) columns chosen by the user
+      const linkedFields = new Set(cols.map(c => c.field));
+      for (const path of (r.manualColumns ?? [])) {
+        if (!linkedFields.has(path)) {
+          cols.push({ field: path, label: path.split('.').pop(), manual: true });
+        }
+      }
 
-      // Items in the ignore list, keyed by _dibKey
       const ignoredKeys = new Set((r.ignoredItems ?? []).map(i => i._dibKey));
-
-      const rawItems = this._preview[r.id] ?? null;
-      const flatItems = rawItems
+      const rawItems    = this._preview[r.id] ?? null;
+      const flatItems   = rawItems
         ? rawItems
             .map((item, idx) => {
-              const dibKey = item.name ?? `_${idx}`;
-              const flat = foundry.utils.flattenObject(item);
+              const dibKey = `_${idx}`;
+              const flat   = foundry.utils.flattenObject(item);
               flat._dibKey = dibKey;
-              flat._key   = `${r.id}::${dibKey}`;
+              flat._key    = `${r.id}::${dibKey}`;
+              // Apply any per-cell value overrides
+              const ovr = this._cellOverrides[r.id]?.[dibKey] ?? {};
+              for (const [ovField, ovVal] of Object.entries(ovr)) flat[ovField] = ovVal;
               return flat;
             })
             .filter(item => !ignoredKeys.has(item._dibKey))
         : null;
 
       const ignoredFlatItems = (r.ignoredItems ?? []).map(item => {
-        const flat = foundry.utils.flattenObject(item);
+        const flat   = foundry.utils.flattenObject(item);
         flat._dibKey = item._dibKey;
-        flat._key   = `${r.id}::${item._dibKey}`;
+        flat._key    = `${r.id}::${item._dibKey}`;
         return flat;
       });
 
@@ -152,56 +191,112 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
     const hasIgnoredItems = this._rules.some(r => (r.ignoredItems ?? []).length > 0);
 
-    // Cache attribute paths for context menu use
     if (attributePaths.length) this._cachedAttributePaths = attributePaths;
 
-    // Build a flat, indented folder list for the picker
     const itemFolders = game.folders
       .filter(f => f.type === 'Item')
       .sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0))
-      .map(f => ({
-        id: f.id,
-        name: '\u00a0'.repeat((f.depth ?? 0) * 2) + f.name
-      }));
+      .map(f => ({ id: f.id, name: '\u00a0'.repeat((f.depth ?? 0) * 2) + f.name }));
+
+    // Guard: removed tabs — fall back to tables
+    if (this._rightTab === 'suggested' || this._rightTab === 'text') this._rightTab = 'tables';
+
+    // Attribute link suggestions — computed from detected columns vs available paths
+    const suggestions = rule && attributePaths.length && this._scanData
+      ? computeSuggestionsForRule(rule, this._scanData, attributePaths)
+      : [];
+
+    // Flat attribute list for the new mapping UI (all system fields + orphan mappings)
+    const seenPaths   = new Set();
+    const attributeList = attributePaths.map(attr => {
+      seenPaths.add(attr.path);
+      const mapping    = rule?.attributes.find(a => a.foundryField === attr.path && a.columnHeader);
+      const suggestion = suggestions.find(s => s.suggestedField === attr.path);
+      const inPreview  = !mapping && (rule?.manualColumns ?? []).includes(attr.path);
+      return {
+        path:                attr.path,
+        shortLabel:          attr.path.split('.').pop(),
+        linked:              !!mapping,
+        columnHeader:        mapping?.columnHeader ?? '',
+        transform:           mapping?.transform ?? 'trim',
+        suggested:           !mapping && !!suggestion,
+        suggestedColumn:     suggestion?.columnHeader ?? '',
+        suggestedScoreClass: suggestion?.scoreClass ?? '',
+        suggestedScoreLabel: suggestion?.scoreLabel ?? '',
+        status:              mapping ? 'linked' : (suggestion ? 'suggested' : 'none'),
+        inPreview
+      };
+    });
+    // Append any custom mappings pointing to paths not in the standard list
+    for (const attr of (rule?.attributes ?? [])) {
+      if (attr.foundryField && !seenPaths.has(attr.foundryField) && attr.columnHeader) {
+        attributeList.push({
+          path: attr.foundryField, shortLabel: attr.foundryField.split('.').pop(),
+          linked: true, columnHeader: attr.columnHeader, transform: attr.transform ?? 'trim',
+          suggested: false, suggestedColumn: '', suggestedScoreClass: '', suggestedScoreLabel: '',
+          status: 'linked', inPreview: false
+        });
+      }
+    }
+    attributeList.sort((a, b) => ({ linked: 0, suggested: 1, none: 2 }[a.status] ?? 2) - ({ linked: 0, suggested: 1, none: 2 }[b.status] ?? 2));
+    const suggestionCount = attributeList.filter(a => a.suggested).length;
 
     return {
-      hasPdf: !!this._pdf,
-      pdfName: this._pdfName,
-      pdfPages: this._pdfPages,
-      rules: this._rules,
+      hasPdf:    !!this._pdf,
+      pdfName:   this._pdfName,
+      pdfPages:  this._pdfPages,
+      rules:     this._rules,
       selectedRuleId: this._selectedRuleId,
-      selectedRule: rule,
+      selectedRule:   rule,
       itemTypes,
       attributePaths,
       previewSummary,
       hasIgnoredItems,
-      previewLoading: this._previewLoading,
-      contentTypes: CONTENT_TYPES,
-      transforms: TRANSFORMS,
+      previewLoading:  this._previewLoading,
+      transforms:      TRANSFORMS,
       itemFolders,
       selectedFolderId: this._selectedFolderId,
-      scanData:         this._scanData,
-      textData:         this._textData,
-      tablesTabActive:  this._activeTab === 'tables',
-      textTabActive:    this._activeTab === 'text',
-      previewTabActive: this._activeTab === 'preview'
+      scanData:  enrichScanDataColumns(this._scanData, rule, suggestions),
+      // Center panel tabs
+      plannerTabActive:     this._centerTab === 'planner',
+      itemPlannerTabActive: this._centerTab === 'item-planner',
+      plannerPage: this._plannerPage,
+      drawMode:    this._drawMode,
+      // Right panel tabs
+      tablesTabActive:  this._rightTab === 'tables',
+      previewTabActive: this._rightTab === 'preview',
+      // Region counts for badges
+      tableRegionCount: (rule?.regions ?? []).filter(r => r.type === 'table').length,
+      // Attribute mapping list
+      attributeList,
+      suggestionCount,
+      previewHasContent: previewSummary.some(r => (r.items ?? []).length > 0),
+      // Planner page navigation — restrict to pages defined in rule
+      plannerAtFirst: !this.#plannerPages().length || this._plannerPage <= this.#plannerPages()[0],
+      plannerAtLast:  !this.#plannerPages().length || this._plannerPage >= this.#plannerPages()[this.#plannerPages().length - 1]
     };
   }
 
   _onRender(context, options) {
     super._onRender(context, options);
     this._bindEvents();
-    // Reapply selection highlights and button states after every render
+    // Reapply selection highlights
     const previewList = this.element.querySelector('.preview-list');
     const ignoreList  = this.element.querySelector('.ignore-list');
     if (previewList) this.#applySelectionClasses(previewList, this._previewSel);
     if (ignoreList)  this.#applySelectionClasses(ignoreList,  this._ignoreSel);
     this.#updatePreviewToolbar(this.element);
     this.#updateIgnoreToolbar(this.element);
+    // Render planner canvas async (no await — fires and updates DOM independently)
+    this.#renderPlannerCanvas();
+    // Mark overridden, multi-selected, and errored preview cells
+    this.#applyOverrideClasses();
+    this.#applyCellSelClasses();
+    this.#applyTestErrorClasses();
   }
 
   // -------------------------------------------------------------------------
-  // Event binding (non-action events)
+  // Event binding
   // -------------------------------------------------------------------------
 
   _bindEvents() {
@@ -213,13 +308,29 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       if (file) this.#handlePdfFile(file);
     });
 
-    // Folder picker
+    // Global folder picker
     el.querySelector('#dib-folder-select')?.addEventListener('change', e => {
       this._selectedFolderId = e.target.value || null;
     });
 
-    // Rule editor — field changes delegated to the form section
-    el.querySelector('.rule-editor-inner')?.addEventListener('change', e => {
+    // Center panel tab bar
+    el.querySelector('.dib-center-tab-bar')?.addEventListener('click', e => {
+      const btn = e.target.closest('[data-center-tab]');
+      if (!btn) return;
+      this._centerTab = btn.dataset.centerTab;
+      this.render();
+    });
+
+    // Right panel tab bar
+    el.querySelector('.dib-tab-bar')?.addEventListener('click', e => {
+      const btn = e.target.closest('[data-tab]');
+      if (!btn) return;
+      this._rightTab = btn.dataset.tab;
+      this.render();
+    });
+
+    // Rule editor field changes — covers both the topbar and the item planner tab
+    el.querySelector('.dib-panel-editor')?.addEventListener('change', e => {
       this.#onEditorChange(e);
     });
 
@@ -228,72 +339,349 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       this.#onAttributeChange(e);
     });
 
-    // Tab switching in right panel
-    el.querySelector('.dib-tab-bar')?.addEventListener('click', e => {
-      const btn = e.target.closest('.dib-tab');
-      if (!btn) return;
-      this._activeTab = btn.dataset.tab;
-      this.render();
+    // ── PDF Planner ────────────────────────────────────────────────────────
+
+    // Page navigation — step only through pages defined in the rule
+    el.querySelector('[data-planner-nav="prev"]')?.addEventListener('click', () => {
+      const valid = this.#plannerPages();
+      const idx   = valid.indexOf(this._plannerPage);
+      if (idx > 0) { this._plannerPage = valid[idx - 1]; this.#renderPlannerCanvas(); this.#syncPlannerPageDisplay(); }
+    });
+    el.querySelector('[data-planner-nav="next"]')?.addEventListener('click', () => {
+      const valid = this.#plannerPages();
+      const idx   = valid.indexOf(this._plannerPage);
+      if (idx !== -1 && idx < valid.length - 1) { this._plannerPage = valid[idx + 1]; this.#renderPlannerCanvas(); this.#syncPlannerPageDisplay(); }
     });
 
-    // PDF scan — click any cell or prose block for context menu
+    // Draw mode toggle buttons
+    el.querySelectorAll('[data-draw-mode]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const mode = btn.dataset.drawMode;
+        this._drawMode = this._drawMode === mode ? null : mode;
+        // Update button active states without full re-render
+        el.querySelectorAll('[data-draw-mode]').forEach(b => {
+          b.classList.toggle('active', b.dataset.drawMode === this._drawMode);
+        });
+        const wrap = el.querySelector('.dib-planner-canvas-wrap');
+        if (wrap) wrap.classList.toggle('draw-active', !!this._drawMode);
+      });
+    });
+
+    // Canvas drawing (mousedown on viewport to start rectangle)
+    const viewport = el.querySelector('.dib-pdf-viewport');
+    if (viewport) {
+      viewport.addEventListener('mousedown', e => this.#handlePlannerMousedown(e));
+    }
+
+    // Region sidebar: label + group field changes
+    el.querySelector('.dib-region-sidebar')?.addEventListener('change', e => {
+      const input = e.target.closest('[data-region-field]');
+      if (!input) return;
+      const id    = input.dataset.regionId;
+      const field = input.dataset.regionField;
+      const rule  = this.selectedRule;
+      const region = (rule?.regions ?? []).find(r => r.id === id);
+      if (region) { region[field] = input.value; this.#updateRegionOverlay(); }
+    });
+
+    // Scan cell clicks (Table Preview)
     el.querySelector('.dib-scan-content')?.addEventListener('click', e => {
+      const hdrBtn = e.target.closest('.dib-set-headers-btn');
+      if (hdrBtn) { e.stopPropagation(); this.#showSetHeadersPopover(e, hdrBtn.dataset.tableId); return; }
       this.#handleScanClick(e);
     });
 
-    // PDF text — click an entry for context menu
-    el.querySelector('.text-scan-content')?.addEventListener('click', e => {
-      this.#handleTextEntryClick(e);
-    });
-
-    // Preview toolbar buttons
+    // Preview toolbar
     el.querySelector('.dib-preview-toolbar')?.addEventListener('click', e => {
       const btn = e.target.closest('[data-action]');
       if (!btn || btn.disabled) return;
       switch (btn.dataset.action) {
-        case 'preview-select-all':   this.#previewSelectAll();   break;
-        case 'preview-deselect-all': this.#previewDeselectAll(); break;
+        case 'preview-select-all':   this.#previewSelectAll();      break;
+        case 'preview-deselect-all': this.#previewDeselectAll();    break;
         case 'preview-remove':       this.#previewRemoveSelected(); break;
       }
     });
 
-    // Ignore toolbar buttons
+    // Ignore toolbar
     el.querySelector('.dib-ignore-toolbar')?.addEventListener('click', e => {
       const btn = e.target.closest('[data-action]');
       if (!btn || btn.disabled) return;
       switch (btn.dataset.action) {
-        case 'ignore-select-all':    this.#ignoreSelectAll();    break;
-        case 'ignore-deselect-all':  this.#ignoreDeselectAll();  break;
-        case 'ignore-restore':       this.#ignoreRestoreSelected(); break;
+        case 'ignore-select-all':   this.#ignoreSelectAll();         break;
+        case 'ignore-deselect-all': this.#ignoreDeselectAll();       break;
+        case 'ignore-restore':      this.#ignoreRestoreSelected();   break;
       }
     });
 
-    // Row selection
+    // Row selection — only triggered from the dedicated selection column cell
     this.#bindListSelection(
       el.querySelector('.preview-list'), this._previewSel,
-      '_lastPreviewClickKey', () => this.#updatePreviewToolbar(this.element)
+      '_lastPreviewClickKey', () => this.#updatePreviewToolbar(this.element),
+      '.dib-sel-cell'
     );
     this.#bindListSelection(
       el.querySelector('.ignore-list'), this._ignoreSel,
-      '_lastIgnoreClickKey', () => this.#updateIgnoreToolbar(this.element)
+      '_lastIgnoreClickKey', () => this.#updateIgnoreToolbar(this.element),
+      '.dib-sel-cell'
     );
+
+    // Column-cell drag selection (mousedown to support drag-range)
+    const previewList = el.querySelector('.preview-list');
+    previewList?.addEventListener('mousedown', e => {
+      if (e.button !== 0) return;
+      const td = e.target.closest('.preview-td');
+      if (!td) return;
+      e.preventDefault();
+
+      const ruleEl  = td.closest('[data-rule-id]');
+      const rowEl   = td.closest('[data-item-key]');
+      const ruleId  = ruleEl?.dataset.ruleId;
+      const itemKey = rowEl?.dataset.itemKey;
+      const field   = td.dataset.field;
+      if (!ruleId || !itemKey || !field) return;
+      const dibKey = itemKey.substring(ruleId.length + 2);
+
+      if (e.shiftKey && this._lastCellKey
+          && this._cellSelField === field && this._cellSelRuleId === ruleId) {
+        this.#cellRangeSelect(ruleId, field, this._lastCellKey, dibKey);
+      } else if (e.ctrlKey || e.metaKey) {
+        if (this._cellSelField !== field || this._cellSelRuleId !== ruleId) {
+          this._cellSel = [];
+          this._cellSelField = field;
+          this._cellSelRuleId = ruleId;
+        }
+        const idx = this._cellSel.findIndex(c => c.dibKey === dibKey);
+        if (idx >= 0) this._cellSel.splice(idx, 1);
+        else this._cellSel.push({ ruleId, dibKey, field });
+        this._lastCellKey = dibKey;
+      } else {
+        const alreadyInMulti = this._cellSel.length > 1
+          && this.#isCellSelected(ruleId, dibKey, field)
+          && this._cellSelField === field && this._cellSelRuleId === ruleId;
+
+        if (!alreadyInMulti) {
+          this._cellSel      = [{ ruleId, dibKey, field }];
+          this._cellSelField = field;
+          this._cellSelRuleId = ruleId;
+          this._lastCellKey  = dibKey;
+
+          // Drag to extend range within same column
+          this._wasCellDrag = false;
+          const startDibKey = dibKey;
+          const onMove = ev => {
+            const overTd = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.preview-td');
+            if (!overTd || overTd.dataset.field !== field) return;
+            const overRuleEl = overTd.closest('[data-rule-id]');
+            if (overRuleEl?.dataset.ruleId !== ruleId) return;
+            const overKey = overTd.closest('[data-item-key]')?.dataset.itemKey?.substring(ruleId.length + 2);
+            if (!overKey) return;
+            this.#cellRangeSelect(ruleId, field, startDibKey, overKey);
+            this._wasCellDrag = true;
+            this.#applyCellSelClasses();
+          };
+          document.addEventListener('mousemove', onMove);
+          document.addEventListener('mouseup', () => {
+            document.removeEventListener('mousemove', onMove);
+            this.#applyCellSelClasses();
+          }, { once: true });
+        }
+      }
+      this.#applyCellSelClasses();
+    });
+
+    // Column header menu + per-cell context menu in Item Preview
+    previewList?.addEventListener('click', e => {
+      // Always eat the click that follows a drag regardless of where mouse was released
+      if (this._wasCellDrag) { this._wasCellDrag = false; return; }
+      const th = e.target.closest('.preview-th');
+      if (th) { this.#showColumnMenu(e, th); return; }
+      const td = e.target.closest('.preview-td');
+      if (td) {
+        this.#showCellMenu(e, td);
+        return;
+      }
+      // Clicked outside any cell — clear column selection
+      if (this._cellSel.length > 0) {
+        this._cellSel = []; this._cellSelField = null; this._cellSelRuleId = null;
+        this.#applyCellSelClasses();
+      }
+    });
+  }
+
+  /** Returns the sorted list of page numbers valid for the current rule. */
+  #plannerPages() {
+    const rule = this.selectedRule;
+    if (!rule?.pages || !this._pdfPages) return [];
+    return parsePageString(rule.pages, this._pdfPages);
+  }
+
+  /** Snap `_plannerPage` to the nearest valid page for the current rule. */
+  #snapPlannerPage() {
+    const valid = this.#plannerPages();
+    if (!valid.length) return;
+    if (!valid.includes(this._plannerPage)) {
+      this._plannerPage = valid[0];
+    }
   }
 
   // -------------------------------------------------------------------------
-  // Preview / Ignore list selection
+  // PDF Planner — canvas rendering & region painting
   // -------------------------------------------------------------------------
 
-  /**
-   * Attach mouse-based multi-select to a list element whose rows have
-   * [data-item-key] attributes.  Supports click, ctrl+click, shift+click,
-   * and click-drag to extend selection.
-   */
-  #bindListSelection(listEl, selSet, lastKeyProp, onUpdate) {
+  async #renderPlannerCanvas() {
+    const canvas = this.element?.querySelector('#dib-pdf-canvas');
+    const wrap   = this.element?.querySelector('.dib-planner-canvas-wrap');
+    if (!canvas || !wrap || !this._pdf) return;
+
+    const availableWidth = Math.max(100, wrap.clientWidth - 24); // minus padding
+    try {
+      const result = await renderPageToCanvas(this._pdf, this._plannerPage, canvas, availableWidth);
+      this._plannerScale = result.scale;
+      this.#updateRegionOverlay();
+    } catch (err) {
+      console.warn('Dynamic Item Builder | Canvas render error:', err);
+    }
+  }
+
+  /** Rebuild the absolutely-positioned region rectangles on the overlay div. */
+  #updateRegionOverlay() {
+    const overlay = this.element?.querySelector('.dib-region-overlay');
+    const canvas  = this.element?.querySelector('#dib-pdf-canvas');
+    if (!overlay || !canvas) return;
+
+    const rule    = this.selectedRule;
+    const regions = (rule?.regions ?? []).filter(r => r.page === this._plannerPage);
+    const cw      = canvas.width;
+    const ch      = canvas.height;
+
+    overlay.innerHTML = '';
+
+    const makeRegionEl = (region, isDrawing = false) => {
+      const div = document.createElement('div');
+      div.className = `dib-region dib-region-${region.type}${isDrawing ? ' dib-region-drawing' : ''}`;
+      if (!isDrawing) div.dataset.regionId = region.id;
+
+      const s = this._plannerScale;
+      div.style.left   = `${(region.x * s / cw) * 100}%`;
+      div.style.top    = `${(region.y * s / ch) * 100}%`;
+      div.style.width  = `${(region.w * s / cw) * 100}%`;
+      div.style.height = `${(region.h * s / ch) * 100}%`;
+
+      if (!isDrawing) {
+        div.innerHTML = `
+          <span class="dib-region-label">${region.label ?? ''}</span>
+          <button class="dib-region-delete" data-action="deleteRegion"
+                  data-region-id="${region.id}" title="Remove region">
+            <i class="fas fa-times"></i>
+          </button>`;
+      }
+      return div;
+    };
+
+    for (const region of regions) overlay.appendChild(makeRegionEl(region));
+
+    // In-progress draw ghost
+    if (this._drawRect && this._drawRect.w > 2 && this._drawRect.h > 2) {
+      overlay.appendChild(makeRegionEl(
+        { ...this._drawRect, type: this._drawMode ?? 'table', label: '' },
+        true
+      ));
+    }
+  }
+
+  /** Update only the page indicator text — no re-render needed. */
+  #syncPlannerPageDisplay() {
+    const el = this.element?.querySelector('.dib-planner-page-label');
+    if (el) el.textContent = `${this._plannerPage} / ${this._pdfPages}`;
+    this.#updateRegionOverlay();
+  }
+
+  // ── Drawing interaction ──────────────────────────────────────────────────
+
+  #handlePlannerMousedown(event) {
+    if (!this._drawMode) return;
+    // Don't start a draw if the user clicked a region button or input
+    if (event.target.closest('.dib-region-delete, .dib-region-label')) return;
+
+    const coords = this.#getPdfCoords(event);
+    if (!coords) return;
+
+    this._drawStart = coords;
+    this._drawRect  = { ...coords, w: 0, h: 0 };
+    event.preventDefault();
+
+    const onMove = ev => {
+      const c = this.#getPdfCoords(ev);
+      if (!c || !this._drawStart) return;
+      this._drawRect = {
+        x: Math.min(this._drawStart.x, c.x),
+        y: Math.min(this._drawStart.y, c.y),
+        w: Math.abs(c.x - this._drawStart.x),
+        h: Math.abs(c.y - this._drawStart.y)
+      };
+      this.#updateRegionOverlay();
+    };
+
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      const rect = this._drawRect;
+      this._drawStart = null;
+      this._drawRect  = null;
+      if (rect && rect.w > 10 && rect.h > 10) this.#addRegion(rect);
+      else this.#updateRegionOverlay();
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp, { once: true });
+  }
+
+  #getPdfCoords(event) {
+    const canvas = this.element?.querySelector('#dib-pdf-canvas');
+    if (!canvas || !this._plannerScale) return null;
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: Math.max(0, (event.clientX - rect.left)  / this._plannerScale),
+      y: Math.max(0, (event.clientY - rect.top)   / this._plannerScale)
+    };
+  }
+
+  #addRegion(rect) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    rule.regions ??= [];
+
+    const typeLabel = this._drawMode === 'table' ? 'Table' : 'Text';
+    const count     = rule.regions.filter(r => r.type === this._drawMode).length + 1;
+    const group     = `${this._drawMode}-${count}`;
+
+    rule.regions.push({
+      id:    foundry.utils.randomID(),
+      type:  this._drawMode,
+      group,
+      page:  this._plannerPage,
+      x: Math.round(rect.x), y: Math.round(rect.y),
+      w: Math.round(rect.w), h: Math.round(rect.h),
+      label: `${typeLabel} ${count}`
+    });
+
+    this.#schedulePreview();
+    this.render();
+  }
+
+  // -------------------------------------------------------------------------
+  // Preview / Ignore selection
+  // -------------------------------------------------------------------------
+
+  #bindListSelection(listEl, selSet, lastKeyProp, onUpdate, triggerSelector = null) {
     if (!listEl) return;
     listEl.addEventListener('mousedown', e => {
-      const row = e.target.closest('[data-item-key]');
+      const origin = triggerSelector
+        ? e.target.closest(triggerSelector)
+        : e.target.closest('[data-item-key]');
+      if (!origin) return;
+      const row = origin.closest('[data-item-key]');
       if (!row) return;
-      e.preventDefault();   // prevent text-selection during drag
+      e.preventDefault();
 
       const key     = row.dataset.itemKey;
       const allRows = [...listEl.querySelectorAll('[data-item-key]')];
@@ -301,24 +689,18 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       const idx     = keys.indexOf(key);
 
       if (e.shiftKey && this[lastKeyProp]) {
-        // Range-select from last click to this row
         const fromIdx = keys.indexOf(this[lastKeyProp]);
         const [lo, hi] = [Math.min(fromIdx, idx), Math.max(fromIdx, idx)];
         for (let i = lo; i <= hi; i++) selSet.add(keys[i]);
-
       } else if (e.ctrlKey || e.metaKey) {
-        // Toggle individual row
         if (selSet.has(key)) selSet.delete(key);
         else selSet.add(key);
         this[lastKeyProp] = key;
-
       } else {
-        // Single select (or start of drag)
         selSet.clear();
         selSet.add(key);
         this[lastKeyProp] = key;
 
-        // Drag: sweep rows between anchor and current mouse position
         const onOver = ev => {
           const target = ev.target.closest('[data-item-key]');
           if (!target) return;
@@ -341,7 +723,6 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     });
   }
 
-  /** Toggle .dib-row-selected on each row based on the selection set. */
   #applySelectionClasses(listEl, selSet) {
     for (const row of listEl.querySelectorAll('[data-item-key]')) {
       row.classList.toggle('dib-row-selected', selSet.has(row.dataset.itemKey));
@@ -384,7 +765,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       rule.ignoredItems ??= [];
       if (rule.ignoredItems.some(i => i._dibKey === dibKey)) continue;
       const raw = this._preview[ruleId]
-        ?.find((item, idx) => (item.name ?? `_${idx}`) === dibKey);
+        ?.find((_item, idx) => `_${idx}` === dibKey);
       if (raw) rule.ignoredItems.push({ ...foundry.utils.deepClone(raw), _dibKey: dibKey });
       else     rule.ignoredItems.push({ _dibKey: dibKey, name: dibKey });
     }
@@ -428,9 +809,11 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
   async #handlePdfFile(file) {
     try {
       ui.notifications.info('Dynamic Item Builder | Loading PDF…');
-      this._pdf = await loadPDF(file);
-      this._pdfName = file.name;
+      this._pdf      = await loadPDF(file);
+      this._pdfName  = file.name;
       this._pdfPages = this._pdf.numPages;
+      // Reset planner to page 1
+      this.#snapPlannerPage();
       ui.notifications.info(`Loaded "${file.name}" — ${this._pdfPages} pages.`);
       this.render();
     } catch (err) {
@@ -440,40 +823,34 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
   }
 
   // -------------------------------------------------------------------------
-  // Rule field change handler
+  // Rule field change handlers
   // -------------------------------------------------------------------------
 
   #onEditorChange(event) {
-    const rule = this.selectedRule;
+    const rule  = this.selectedRule;
     if (!rule) return;
-
     const field = event.target.dataset.field;
     if (!field) return;
-
-    const raw = event.target.value;
+    const raw   = event.target.value;
     const value = event.target.type === 'number' ? (raw === '' ? null : Number(raw)) : raw;
     foundry.utils.setProperty(rule, field, value);
 
-    // Re-render the rule list label if name changed
     if (field === 'name') {
       const label = this.element.querySelector(`[data-rule-id="${rule.id}"] .rule-name`);
       if (label) label.textContent = value || '(unnamed)';
     }
-
+    if (field === 'pages') this.#snapPlannerPage();
     this.#schedulePreview();
   }
 
   #onAttributeChange(event) {
     const rule = this.selectedRule;
     if (!rule) return;
-
-    const idx = Number(event.target.closest('[data-attr-index]')?.dataset.attrIndex);
+    const idx  = Number(event.target.closest('[data-attr-index]')?.dataset.attrIndex);
     if (isNaN(idx)) return;
-
     const field = event.target.dataset.field;
     if (!field) return;
-
-    const raw = event.target.value;
+    const raw   = event.target.value;
     const value = event.target.type === 'number' ? (raw === '' ? null : Number(raw)) : raw;
     rule.attributes[idx][field] = value;
     this.#schedulePreview();
@@ -490,6 +867,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
   async #runPreview() {
     if (!this._pdf) return;
+    this._testErrors = {};   // stale test results no longer valid after a re-scan
     this._previewLoading = true;
     this.render();
     await this.#runScan();
@@ -512,42 +890,139 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
   }
 
   // -------------------------------------------------------------------------
-  // PDF Scan
+  // PDF Scan — region-based or auto-detect fallback
   // -------------------------------------------------------------------------
 
   async #runScan() {
     const rule = this.selectedRule;
     if (!this._pdf || !rule?.pages) {
       this._scanData = null;
-      this._textData = null;
       return;
     }
 
     try {
-      const pageNums = parsePageString(rule.pages, this._pdf.numPages);
-      const pages    = await extractPages(this._pdf, pageNums);
-      const allItems = mergePageItems(pages);
-      this._scanData = detectTables(allItems);
-      this._textData = detectTextSections(allItems);
+      const pageNums     = parsePageString(rule.pages, this._pdf.numPages);
+      const pages        = await extractPages(this._pdf, pageNums);
+      const tableRegions = (rule.regions ?? []).filter(r => r.type === 'table');
+
+      if (tableRegions.length > 0) {
+        this._scanData = this.#scanTableRegions(pages, tableRegions);
+      } else {
+        // Auto-detect fallback
+        const allItems = mergePageItems(pages);
+        this._scanData = detectTables(allItems);
+      }
     } catch (err) {
       console.warn('Dynamic Item Builder | Scan error:', err);
       this._scanData = null;
-      this._textData = null;
+    }
+
+    // Apply any manually-set column headers stored in the rule
+    this.#applyManualHeaders(rule);
+
+    // Apply any column splits defined for this rule
+    this.#applyColumnSplits(rule);
+
+    // Auto-populate headerPattern from the first labeled column if not already set
+    if (rule && !rule.headerPattern?.trim() && this._scanData?.tables?.[0]?.columns?.length) {
+      const firstHeader = this._scanData.tables[0].columns.find(c => c.header)?.header;
+      if (firstHeader) rule.headerPattern = firstHeader;
     }
   }
 
+  #applyManualHeaders(rule) {
+    if (!this._scanData?.tables || !rule?.manualHeaders) return;
+    for (const table of this._scanData.tables) {
+      const override = rule.manualHeaders[table.id];
+      if (!override?.headers?.length) continue;
+      const { headers, originalHeaders } = override;
+
+      // Remap existing row cells from whatever they're currently named → new names (by index)
+      for (const row of table.rows) {
+        row.cells = row.cells.map((cell, i) => ({ ...cell, column: headers[i] ?? cell.column }));
+      }
+
+      // Prepend the originally-detected header row as the first data row
+      if (originalHeaders?.some(h => h)) {
+        table.rows.unshift({
+          cells:   headers.map((h, i) => ({ column: h, value: originalHeaders[i] ?? '' })),
+          rawText: originalHeaders.join(' '),
+          _injected: true
+        });
+      }
+
+      // Apply new column names
+      headers.forEach((h, i) => { if (table.columns[i]) table.columns[i].header = h; });
+    }
+  }
+
+  #applyColumnSplits(rule) {
+    if (!this._scanData?.tables || !rule?.columnSplits) return;
+    applyColumnSplits(this._scanData.tables, rule.columnSplits);
+  }
+
+  /** Filter a single page's items to those inside a region bounding box. */
+  #filterItemsToRegion(page, region) {
+    return page.items.filter(item =>
+      item.x >= region.x            &&
+      item.x <= region.x + region.w &&
+      item.y >= region.y            &&
+      item.y <= region.y + region.h
+    );
+  }
+
+  /**
+   * Extract and collate table regions.
+   * Regions sharing the same `group` have their rows merged (columns from
+   * the first region in the group are used as the canonical schema).
+   */
+  #scanTableRegions(pages, regions) {
+    // Group regions by their `group` key, in page→Y order
+    const groups = new Map();
+    for (const region of [...regions].sort((a, b) => a.page - b.page || a.y - b.y)) {
+      if (!groups.has(region.group)) groups.set(region.group, []);
+      groups.get(region.group).push(region);
+    }
+
+    const tables    = [];
+    const proseRows = [];
+
+    for (const [, groupRegions] of groups) {
+      let yOffset    = 0;
+      const groupItems = [];
+
+      for (const region of groupRegions) {
+        const page = pages.find(p => p.pageNum === region.page);
+        if (!page) continue;
+        const regionItems = this.#filterItemsToRegion(page, region);
+        for (const item of regionItems) {
+          groupItems.push({ ...item, y: item.y + yOffset });
+        }
+        if (regionItems.length) {
+          yOffset += Math.max(...regionItems.map(i => i.y)) + 50;
+        }
+      }
+
+      if (!groupItems.length) continue;
+      const result = detectTables(groupItems);
+      tables.push(...result.tables);
+      proseRows.push(...result.proseRows);
+    }
+
+    tables.forEach((t, i) => { t.id = `tbl-${i}`; });
+    return { tables, proseRows };
+  }
+
   // -------------------------------------------------------------------------
-  // Scan context menu
+  // Scan context menus
   // -------------------------------------------------------------------------
 
   #handleScanClick(event) {
-    const rule = this.selectedRule;
+    const rule       = this.selectedRule;
     if (!rule) return;
-
     const headerCell = event.target.closest('[data-scan="header-cell"]');
     const dataCell   = event.target.closest('[data-scan="data-cell"]');
     const proseBlock = event.target.closest('[data-scan="prose"]');
-
     if (!headerCell && !dataCell && !proseBlock) return;
 
     event.stopPropagation();
@@ -555,35 +1030,46 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     const col = (headerCell ?? dataCell)?.dataset.column;
 
     if (headerCell) {
+      const tableId = headerCell.dataset.tableId;
       menuItems.push({
         icon: 'fa-heading',
         label: `Set Header Pattern: "${col}"`,
         action: () => { rule.headerPattern = col; this.#schedulePreview(); this.render(); }
       });
+      const hasSplit = rule.columnSplits?.[tableId]?.[col];
+      menuItems.push({
+        icon: 'fa-columns',
+        label: hasSplit ? `Edit Split: "${col}" (on "${hasSplit}")` : `Split Column: "${col}"`,
+        action: () => this.#showSplitColumnPopover(event, tableId, col)
+      });
+      if (hasSplit) {
+        menuItems.push({
+          icon: 'fa-times',
+          label: `Remove Split: "${col}"`,
+          action: () => {
+            delete rule.columnSplits[tableId][col];
+            if (!Object.keys(rule.columnSplits[tableId]).length) delete rule.columnSplits[tableId];
+            this.#schedulePreview();
+          }
+        });
+      }
     }
-
     if (dataCell) {
       const val = dataCell.dataset.value;
       menuItems.push({
         icon: 'fa-ban',
         label: `Add to Skip Pattern: "${val}"`,
         action: () => {
-          rule.skipPattern = rule.skipPattern
-            ? `${rule.skipPattern}|${_esc(val)}`
-            : _esc(val);
+          rule.skipPattern = rule.skipPattern ? `${rule.skipPattern}|${_esc(val)}` : _esc(val);
           this.#schedulePreview(); this.render();
         }
       });
       menuItems.push({
         icon: 'fa-flag',
         label: `Set as Item Start Pattern`,
-        action: () => {
-          rule.rowDetectionPattern = `^${_esc(val)}`;
-          this.#schedulePreview(); this.render();
-        }
+        action: () => { rule.rowDetectionPattern = `^${_esc(val)}`; this.#schedulePreview(); this.render(); }
       });
     }
-
     if (proseBlock) {
       const text = proseBlock.dataset.text?.slice(0, 40);
       menuItems.push({
@@ -595,67 +1081,171 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         }
       });
     }
-
-    // Column → field mapping (for any table cell)
     if (col && this._cachedAttributePaths.length) {
       menuItems.push({ separator: true });
       menuItems.push({ heading: `Map column "${col}" to field:` });
+      menuItems.push({ filterInput: true });
       for (const attr of this._cachedAttributePaths) {
         menuItems.push({
-          icon: 'fa-link',
-          label: attr.path,
+          icon: 'fa-link', label: attr.path, filterable: true,
           action: () => { this.#mapColumnToField(rule, col, attr.path); this.render(); }
         });
       }
     }
-
     this.#showContextMenu(event, menuItems);
   }
 
-  #handleTextEntryClick(event) {
+  #showSetHeadersPopover(event, tableId) {
+    document.querySelector('.dib-cell-popover')?.remove();
     const rule  = this.selectedRule;
-    const entry = event.target.closest('[data-scan="text-entry"]');
-    if (!rule || !entry) return;
-    event.stopPropagation();
+    const table = this._scanData?.tables?.find(t => t.id === tableId);
+    if (!rule || !table) return;
 
-    const name = entry.dataset.name ?? '';
-    const desc = entry.dataset.description ?? '';
-    const menuItems = [];
+    const existing        = rule.manualHeaders?.[tableId];
+    // Original headers: the raw text the parser detected as column headers (captured once)
+    const originalHeaders = existing?.originalHeaders ?? table.columns.map(c => c.header ?? '');
+    // Current user-defined names (or column numbers if first time)
+    const currentHeaders  = existing?.headers ?? table.columns.map((_, i) => `Col ${i + 1}`);
 
-    if (name) {
-      menuItems.push({
-        icon: 'fa-flag',
-        label: `Set Item Start Pattern: "${name.slice(0, 35)}"`,
-        action: () => {
-          rule.rowDetectionPattern = _esc(name.split(/[\s,]/)[0]);
-          this.#schedulePreview(); this.render();
-        }
-      });
-      if (this._cachedAttributePaths.length) {
-        menuItems.push({ separator: true });
-        menuItems.push({ heading: `Map name "${name.slice(0, 30)}" to field:` });
-        for (const attr of this._cachedAttributePaths) {
-          menuItems.push({
-            icon: 'fa-link',
-            label: attr.path,
-            action: () => {
-              rule.attributes.push({
-                ...makeDefaultAttribute(),
-                pattern: _esc(name),
-                foundryField: attr.path
-              });
-              this.#schedulePreview(); this.render();
-            }
-          });
-        }
+    const esc = s => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    const inputsHtml = table.columns.map((_, i) => {
+      const orig = esc(originalHeaders[i] ?? `Col ${i + 1}`);
+      const cur  = esc(currentHeaders[i]  ?? '');
+      return `<div class="dib-hpop-col">
+        <label class="dib-hpop-label" title="Original: ${orig}">${orig}</label>
+        <input type="text" class="dib-cpop-input dib-hpop-input" data-col-idx="${i}"
+               value="${cur}" placeholder="${orig}">
+      </div>`;
+    }).join('');
+
+    const popover = document.createElement('div');
+    popover.className = 'dib-cell-popover dib-headers-popover';
+    popover.innerHTML = `
+      <div class="dib-cpop-label">Create Column Headers <span style="font-weight:400;text-transform:none;font-size:9px;color:#666">(original values shown as labels)</span></div>
+      <div class="dib-hpop-inputs">${inputsHtml}</div>
+      <div class="dib-cpop-btns">
+        <button class="dib-btn dib-btn-sm dib-btn-primary dib-cpop-save">Save</button>
+        <button class="dib-btn dib-btn-sm dib-cpop-cancel">Cancel</button>
+      </div>`;
+    document.body.appendChild(popover);
+
+    const btn  = event.target.closest('.dib-set-headers-btn');
+    const rect = btn?.getBoundingClientRect() ?? { bottom: event.clientY, left: event.clientX, top: event.clientY };
+    const pw   = popover.offsetWidth  || 300;
+    const ph   = popover.offsetHeight || 120;
+    let   top  = rect.bottom + 4;
+    if (top + ph > window.innerHeight - 8) top = rect.top - ph - 4;
+    popover.style.left = `${Math.max(4, Math.min(rect.left, window.innerWidth - pw - 8))}px`;
+    popover.style.top  = `${Math.max(4, top)}px`;
+
+    const inputs = [...popover.querySelectorAll('.dib-hpop-input')];
+    inputs[0]?.focus();
+
+    const save = () => {
+      const headers = inputs.map(inp => inp.value.trim());
+      if (!rule.manualHeaders) rule.manualHeaders = {};
+      rule.manualHeaders[tableId] = { headers, originalHeaders };
+
+      // Remove any previously injected row, then remap existing cells by index
+      table.rows = table.rows.filter(r => !r._injected);
+      for (const row of table.rows) {
+        row.cells = row.cells.map((cell, i) => ({ ...cell, column: headers[i] ?? cell.column }));
       }
-    }
 
-    this.#showContextMenu(event, menuItems);
+      // Inject original header values as the first data row
+      if (originalHeaders.some(h => h)) {
+        table.rows.unshift({
+          cells:   headers.map((h, i) => ({ column: h, value: originalHeaders[i] ?? '' })),
+          rawText: originalHeaders.join(' '),
+          _injected: true
+        });
+      }
+
+      // Apply new column names
+      headers.forEach((h, i) => { if (table.columns[i]) table.columns[i].header = h; });
+
+      popover.remove();
+      this.render();
+    };
+    const cancel = () => popover.remove();
+
+    popover.querySelector('.dib-cpop-save').addEventListener('click', save);
+    popover.querySelector('.dib-cpop-cancel').addEventListener('click', cancel);
+    inputs.forEach(inp => inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter')  { e.preventDefault(); save();   }
+      if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+    }));
+
+    const closeOut = e => {
+      if (!popover.contains(e.target)) { cancel(); document.removeEventListener('pointerdown', closeOut, true); }
+    };
+    setTimeout(() => document.addEventListener('pointerdown', closeOut, true), 0);
+  }
+
+  #showSplitColumnPopover(event, tableId, col) {
+    document.querySelector('.dib-cell-popover')?.remove();
+    const rule = this.selectedRule;
+    if (!rule || !tableId || !col) return;
+
+    const existing  = rule.columnSplits?.[tableId]?.[col] ?? '';
+    const esc       = s => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+
+    const popover = document.createElement('div');
+    popover.className = 'dib-cell-popover dib-split-popover';
+    popover.innerHTML = `
+      <div class="dib-cpop-label">Split Column <em style="font-weight:400;font-size:10px;text-transform:none">"${esc(col)}"</em></div>
+      <div class="dib-hpop-col" style="margin-bottom:6px">
+        <label class="dib-hpop-label">Split on symbol</label>
+        <input type="text" class="dib-cpop-input dib-split-input" value="${esc(existing)}"
+               placeholder="e.g. /" style="width:80px;text-align:center;font-size:14px">
+        <span style="font-size:10px;color:#888;margin-top:3px;display:block">
+          Max sub-columns determined from data. Short rows duplicate their last value.
+        </span>
+      </div>
+      <div class="dib-cpop-btns">
+        <button class="dib-btn dib-btn-sm dib-btn-primary dib-cpop-save">Apply</button>
+        <button class="dib-btn dib-btn-sm dib-cpop-cancel">Cancel</button>
+      </div>`;
+    document.body.appendChild(popover);
+
+    const input = popover.querySelector('.dib-split-input');
+    const btn   = event.target.closest('[data-scan]') ?? { getBoundingClientRect: () => ({ bottom: event.clientY, left: event.clientX, top: event.clientY }) };
+    const rect  = btn.getBoundingClientRect?.() ?? { bottom: event.clientY, left: event.clientX, top: event.clientY };
+    const pw    = popover.offsetWidth  || 260;
+    const ph    = popover.offsetHeight || 120;
+    let   top   = rect.bottom + 4;
+    if (top + ph > window.innerHeight - 8) top = rect.top - ph - 4;
+    popover.style.left = `${Math.max(4, Math.min(rect.left, window.innerWidth - pw - 8))}px`;
+    popover.style.top  = `${Math.max(4, top)}px`;
+    input.focus();
+    input.select();
+
+    const save = () => {
+      const delimiter = input.value;
+      if (delimiter) {
+        if (!rule.columnSplits) rule.columnSplits = {};
+        if (!rule.columnSplits[tableId]) rule.columnSplits[tableId] = {};
+        rule.columnSplits[tableId][col] = delimiter;
+      }
+      popover.remove();
+      this.#schedulePreview();
+    };
+    const cancel = () => popover.remove();
+
+    popover.querySelector('.dib-cpop-save').addEventListener('click', save);
+    popover.querySelector('.dib-cpop-cancel').addEventListener('click', cancel);
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter')  { e.preventDefault(); save();   }
+      if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+    });
+
+    const closeOut = e => {
+      if (!popover.contains(e.target)) { cancel(); document.removeEventListener('pointerdown', closeOut, true); }
+    };
+    setTimeout(() => document.addEventListener('pointerdown', closeOut, true), 0);
   }
 
   #mapColumnToField(rule, columnHeader, foundryField) {
-    // Only skip if this exact column→field pair already exists
     const duplicate = rule.attributes.find(
       a => a.columnHeader === columnHeader && a.foundryField === foundryField
     );
@@ -665,12 +1255,324 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     this.#schedulePreview();
   }
 
+  #isCellSelected(ruleId, dibKey, field) {
+    return this._cellSel.some(c => c.ruleId === ruleId && c.dibKey === dibKey && c.field === field);
+  }
+
+  #cellRangeSelect(ruleId, field, fromDibKey, toDibKey) {
+    const ruleEl  = this.element?.querySelector(`.preview-rule[data-rule-id="${CSS.escape(ruleId)}"]`);
+    if (!ruleEl) return;
+    const allRows = [...ruleEl.querySelectorAll('.preview-tr[data-item-key]')];
+    const keys    = allRows.map(r => r.dataset.itemKey.substring(ruleId.length + 2));
+    const fromIdx = keys.indexOf(fromDibKey);
+    const toIdx   = keys.indexOf(toDibKey);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const [lo, hi] = [Math.min(fromIdx, toIdx), Math.max(fromIdx, toIdx)];
+    this._cellSel       = keys.slice(lo, hi + 1).map(dibKey => ({ ruleId, dibKey, field }));
+    this._cellSelField  = field;
+    this._cellSelRuleId = ruleId;
+  }
+
+  #applyCellSelClasses() {
+    const el = this.element;
+    if (!el) return;
+    el.querySelectorAll('.preview-td.dib-cell-selected')
+      .forEach(td => td.classList.remove('dib-cell-selected'));
+    for (const { ruleId, dibKey, field } of this._cellSel) {
+      const row  = el.querySelector(`.preview-tr[data-item-key="${CSS.escape(`${ruleId}::${dibKey}`)}"]`);
+      const cell = row?.querySelector(`.preview-td[data-field="${CSS.escape(field)}"]`);
+      cell?.classList.add('dib-cell-selected');
+    }
+  }
+
+  #showMultiCellEditPopover(anchorTd, ruleId, field) {
+    document.querySelector('.dib-cell-popover')?.remove();
+    const count = this._cellSel.length;
+
+    const popover = document.createElement('div');
+    popover.className = 'dib-cell-popover';
+    popover.innerHTML = `
+      <div class="dib-cpop-label">Override ${count} cell${count !== 1 ? 's' : ''} — ${field.split('.').pop()}</div>
+      <input type="text" class="dib-cpop-input" placeholder="New value…">
+      <div class="dib-cpop-btns">
+        <button class="dib-btn dib-btn-sm dib-btn-primary dib-cpop-save">Save</button>
+        <button class="dib-btn dib-btn-sm dib-cpop-cancel">Cancel</button>
+      </div>`;
+    document.body.appendChild(popover);
+
+    const rect = anchorTd.getBoundingClientRect();
+    const pw   = popover.offsetWidth  || 220;
+    const ph   = popover.offsetHeight || 90;
+    let   top  = rect.bottom + 4;
+    if (top + ph > window.innerHeight - 8) top = rect.top - ph - 4;
+    popover.style.left = `${Math.max(4, Math.min(rect.left, window.innerWidth - pw - 8))}px`;
+    popover.style.top  = `${Math.max(4, top)}px`;
+
+    const input = popover.querySelector('.dib-cpop-input');
+    input.focus();
+
+    const save = () => {
+      const val = input.value;
+      for (const { ruleId: rid, dibKey, field: f } of this._cellSel) {
+        if (!this._cellOverrides[rid])         this._cellOverrides[rid] = {};
+        if (!this._cellOverrides[rid][dibKey]) this._cellOverrides[rid][dibKey] = {};
+        this._cellOverrides[rid][dibKey][f] = val;
+        this.#clearTestError(rid, dibKey, f);
+      }
+      popover.remove();
+      this.render();
+    };
+    const cancel = () => popover.remove();
+
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter')  { e.preventDefault(); save();   }
+      if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+    });
+    popover.querySelector('.dib-cpop-save').addEventListener('click',   save);
+    popover.querySelector('.dib-cpop-cancel').addEventListener('click', cancel);
+    const closeOut = e => {
+      if (!popover.contains(e.target)) { cancel(); document.removeEventListener('pointerdown', closeOut, true); }
+    };
+    setTimeout(() => document.addEventListener('pointerdown', closeOut, true), 0);
+  }
+
+  #clearTestError(ruleId, dibKey, field) {
+    const item = this._testErrors[ruleId]?.[dibKey];
+    if (!item) return;
+    delete item[field];
+    // If no specific field errors remain, clear the row-level error too
+    if (!Object.keys(item).some(k => k !== '_row')) {
+      delete this._testErrors[ruleId][dibKey];
+      if (!Object.keys(this._testErrors[ruleId]).length) delete this._testErrors[ruleId];
+    }
+  }
+
+  #applyTestErrorClasses() {
+    const el = this.element;
+    if (!el) return;
+    for (const [ruleId, items] of Object.entries(this._testErrors)) {
+      for (const [dibKey, fields] of Object.entries(items)) {
+        const rowKey = `${ruleId}::${dibKey}`;
+        const row = el.querySelector(`.preview-tr[data-item-key="${CSS.escape(rowKey)}"]`);
+        if (!row) continue;
+        if (fields._row) row.classList.add('dib-row-error');
+        for (const [field, errMsg] of Object.entries(fields)) {
+          if (field === '_row') continue;
+          const cell = row.querySelector(`.preview-td[data-field="${CSS.escape(field)}"]`);
+          if (cell) { cell.classList.add('dib-cell-error'); cell.title = errMsg; }
+        }
+      }
+    }
+  }
+
+  #applyOverrideClasses() {
+    const el = this.element;
+    if (!el) return;
+    for (const [ruleId, items] of Object.entries(this._cellOverrides)) {
+      for (const [dibKey, fields] of Object.entries(items)) {
+        const rowKey = `${ruleId}::${dibKey}`;
+        const row = el.querySelector(`.preview-tr[data-item-key="${CSS.escape(rowKey)}"]`);
+        if (!row) continue;
+        for (const field of Object.keys(fields)) {
+          const cell = row.querySelector(`.preview-td[data-field="${CSS.escape(field)}"]`);
+          cell?.classList.add('dib-cell-overridden');
+        }
+      }
+    }
+  }
+
+  #showColumnMenu(event, th) {
+    const ruleEl = th.closest('[data-rule-id]');
+    const ruleId = ruleEl?.dataset.ruleId;
+    const field  = th.dataset.field;
+    if (!ruleId || !field) return;
+
+    this.#showContextMenu(event, [
+      {
+        icon: 'fa-font',
+        label: 'Lowercase all values',
+        action: () => {
+          const rule        = this._rules.find(r => r.id === ruleId);
+          const ignoredKeys = new Set((rule?.ignoredItems ?? []).map(i => i._dibKey));
+          const items       = this._preview[ruleId] ?? [];
+          let changed = 0;
+          items.forEach((item, idx) => {
+            const dibKey = `_${idx}`;
+            if (ignoredKeys.has(dibKey)) return;
+            const flat   = foundry.utils.flattenObject(item);
+            const cur    = this._cellOverrides[ruleId]?.[dibKey]?.[field] !== undefined
+              ? String(this._cellOverrides[ruleId][dibKey][field])
+              : (flat[field] != null ? String(flat[field]) : null);
+            if (cur === null) return;
+            const lower = cur.toLowerCase();
+            if (lower === cur) return;
+            if (!this._cellOverrides[ruleId])         this._cellOverrides[ruleId] = {};
+            if (!this._cellOverrides[ruleId][dibKey]) this._cellOverrides[ruleId][dibKey] = {};
+            this._cellOverrides[ruleId][dibKey][field] = lower;
+            changed++;
+          });
+          if (changed > 0) this.render();
+        }
+      },
+      {
+        icon: 'fa-hashtag',
+        label: 'Convert to integer',
+        action: () => {
+          const rule        = this._rules.find(r => r.id === ruleId);
+          const ignoredKeys = new Set((rule?.ignoredItems ?? []).map(i => i._dibKey));
+          const items       = this._preview[ruleId] ?? [];
+          let changed = 0;
+          items.forEach((item, idx) => {
+            const dibKey = `_${idx}`;
+            if (ignoredKeys.has(dibKey)) return;
+            const flat   = foundry.utils.flattenObject(item);
+            const cur    = this._cellOverrides[ruleId]?.[dibKey]?.[field] !== undefined
+              ? String(this._cellOverrides[ruleId][dibKey][field])
+              : (flat[field] != null ? String(flat[field]) : null);
+            if (cur === null) return;
+            const stripped = cur.replace(/,/g, '');
+            const parsed   = parseInt(stripped, 10);
+            const next     = isNaN(parsed) ? cur : String(parsed);
+            if (next === cur) return;
+            if (!this._cellOverrides[ruleId])         this._cellOverrides[ruleId] = {};
+            if (!this._cellOverrides[ruleId][dibKey]) this._cellOverrides[ruleId][dibKey] = {};
+            this._cellOverrides[ruleId][dibKey][field] = next;
+            changed++;
+          });
+          if (changed > 0) this.render();
+        }
+      }
+    ]);
+  }
+
+  #showCellMenu(event, td) {
+    event.stopPropagation();
+    const ruleEl  = td.closest('[data-rule-id]');
+    const rowEl   = td.closest('[data-item-key]');
+    const ruleId  = ruleEl?.dataset.ruleId;
+    const itemKey = rowEl?.dataset.itemKey;
+    const field   = td.dataset.field;
+    if (!ruleId || !itemKey || !field) return;
+
+    const dibKey      = itemKey.substring(ruleId.length + 2);
+    const hasOverride = this._cellOverrides[ruleId]?.[dibKey]?.[field] !== undefined;
+    const inMultiSel  = this._cellSel.length > 1
+      && this._cellSelField === field
+      && this._cellSelRuleId === ruleId
+      && this.#isCellSelected(ruleId, dibKey, field);
+
+    const menuItems = [];
+
+    if (inMultiSel) {
+      menuItems.push({
+        icon: 'fa-edit',
+        label: `Override Selected (${this._cellSel.length} cells)`,
+        action: () => this.#showMultiCellEditPopover(td, ruleId, field)
+      });
+      menuItems.push({ separator: true });
+    }
+
+    menuItems.push({
+      icon: 'fa-edit',
+      label: 'Override Value',
+      action: () => this.#showCellEditPopover(td, ruleId, dibKey, field)
+    });
+
+    if (hasOverride) {
+      menuItems.push(
+        { separator: true },
+        { icon: 'fa-undo', label: 'Restore Default',
+          action: () => { delete this._cellOverrides[ruleId][dibKey][field]; this.render(); }
+        }
+      );
+    }
+
+    if (inMultiSel) {
+      const anyOverrides = this._cellSel.some(
+        c => this._cellOverrides[c.ruleId]?.[c.dibKey]?.[c.field] !== undefined
+      );
+      if (anyOverrides) {
+        menuItems.push({
+          icon: 'fa-undo',
+          label: `Restore All Selected`,
+          action: () => {
+            for (const c of this._cellSel) {
+              if (this._cellOverrides[c.ruleId]?.[c.dibKey])
+                delete this._cellOverrides[c.ruleId][c.dibKey][c.field];
+            }
+            this.render();
+          }
+        });
+      }
+    }
+
+    this.#showContextMenu(event, menuItems);
+  }
+
+  #showCellEditPopover(td, ruleId, dibKey, field) {
+    document.querySelector('.dib-cell-popover')?.remove();
+
+    const existing  = this._cellOverrides[ruleId]?.[dibKey]?.[field];
+    const startVal  = existing !== undefined ? existing : td.textContent.trim();
+    const safeVal   = String(startVal).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+
+    const popover = document.createElement('div');
+    popover.className = 'dib-cell-popover';
+    popover.innerHTML = `
+      <div class="dib-cpop-label">${field.split('.').pop()}</div>
+      <input type="text" class="dib-cpop-input" value="${safeVal}">
+      <div class="dib-cpop-btns">
+        <button class="dib-btn dib-btn-sm dib-btn-primary dib-cpop-save">Save</button>
+        <button class="dib-btn dib-btn-sm dib-cpop-cancel">Cancel</button>
+      </div>`;
+    document.body.appendChild(popover);
+
+    // Position below the cell (flip above if near bottom)
+    const rect = td.getBoundingClientRect();
+    const pw   = popover.offsetWidth  || 220;
+    const ph   = popover.offsetHeight || 90;
+    const left = Math.min(rect.left, window.innerWidth  - pw - 8);
+    let   top  = rect.bottom + 4;
+    if (top + ph > window.innerHeight - 8) top = rect.top - ph - 4;
+    popover.style.left = `${Math.max(4, left)}px`;
+    popover.style.top  = `${Math.max(4, top)}px`;
+
+    const input = popover.querySelector('.dib-cpop-input');
+    input.focus();
+    input.select();
+
+    const save = () => {
+      if (!this._cellOverrides[ruleId])         this._cellOverrides[ruleId] = {};
+      if (!this._cellOverrides[ruleId][dibKey]) this._cellOverrides[ruleId][dibKey] = {};
+      this._cellOverrides[ruleId][dibKey][field] = input.value;
+      this.#clearTestError(ruleId, dibKey, field);
+      popover.remove();
+      this.render();
+    };
+    const cancel = () => popover.remove();
+
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter')  { e.preventDefault(); save();   }
+      if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+    });
+    popover.querySelector('.dib-cpop-save').addEventListener('click',   save);
+    popover.querySelector('.dib-cpop-cancel').addEventListener('click', cancel);
+
+    const closeOut = e => {
+      if (!popover.contains(e.target)) { cancel(); document.removeEventListener('pointerdown', closeOut, true); }
+    };
+    setTimeout(() => document.addEventListener('pointerdown', closeOut, true), 0);
+  }
+
   #showContextMenu(event, items) {
     document.querySelector('.dib-context-menu')?.remove();
     if (!items.length) return;
 
     const menu = document.createElement('div');
     menu.className = 'dib-context-menu';
+
+    let filterableList = null;
+    let filterInput    = null;
 
     for (const item of items) {
       if (item.separator) {
@@ -686,21 +1588,61 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         menu.appendChild(h);
         continue;
       }
+      if (item.filterInput) {
+        filterInput = document.createElement('input');
+        filterInput.type = 'text';
+        filterInput.className = 'dib-ctx-filter';
+        filterInput.placeholder = 'Filter fields…';
+
+        filterableList = document.createElement('div');
+        filterableList.className = 'dib-ctx-filterable-list';
+
+        filterInput.addEventListener('input', () => {
+          const q = filterInput.value.toLowerCase();
+          filterableList.querySelectorAll('.dib-ctx-item').forEach(btn => {
+            btn.hidden = !!q && !btn.textContent.toLowerCase().includes(q);
+          });
+        });
+        filterInput.addEventListener('keydown', e => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            filterableList.querySelector('.dib-ctx-item:not([hidden])')?.click();
+          }
+          if (e.key === 'Escape') { e.stopPropagation(); menu.remove(); }
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            filterableList.querySelector('.dib-ctx-item:not([hidden])')?.focus();
+          }
+        });
+
+        menu.appendChild(filterInput);
+        menu.appendChild(filterableList);
+        continue;
+      }
+
       const btn = document.createElement('button');
       btn.className = 'dib-ctx-item';
       btn.innerHTML = `<i class="fas ${item.icon ?? 'fa-circle'}"></i> ${item.label}`;
       btn.addEventListener('click', () => { item.action(); menu.remove(); });
-      menu.appendChild(btn);
+
+      if (item.filterable && filterableList) {
+        filterableList.appendChild(btn);
+      } else {
+        menu.appendChild(btn);
+      }
     }
 
-    // Position near cursor, keep on screen
     document.body.appendChild(menu);
     const { clientX: x, clientY: y } = event;
     const { offsetWidth: w, offsetHeight: h } = menu;
     menu.style.left = `${Math.min(x, window.innerWidth  - w - 8)}px`;
     menu.style.top  = `${Math.min(y, window.innerHeight - h - 8)}px`;
 
-    const close = (e) => { if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('pointerdown', close, true); } };
+    if (filterInput) filterInput.focus();
+
+    const close = e => {
+      if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('pointerdown', close, true); }
+    };
     setTimeout(() => document.addEventListener('pointerdown', close, true), 0);
   }
 
@@ -718,39 +1660,38 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
   static async #deleteRule(event, target) {
     const id = target.closest('[data-rule-id]')?.dataset.ruleId;
     if (!id) return;
-
     const confirmed = await foundry.applications.api.DialogV2.confirm({
       window: { title: 'Delete Rule' },
       content: 'Delete this rule? This cannot be undone.',
       rejectClose: false
     });
     if (!confirmed) return;
-
     this._rules = this._rules.filter(r => r.id !== id);
     delete this._preview[id];
+    delete this._cellOverrides[id];
+    delete this._testErrors[id];
     if (this._selectedRuleId === id) this._selectedRuleId = this._rules[0]?.id ?? null;
     this.render();
   }
 
   static async #selectRule(event, target) {
-    // Don't select when clicking the delete button inside the item
     if (event.target.closest('[data-action="deleteRule"]')) return;
     const id = target.closest('[data-rule-id]')?.dataset.ruleId;
     if (!id || id === this._selectedRuleId) return;
     this._selectedRuleId = id;
-    this._scanData = null; // clear stale scan until refresh
+    this._scanData = null;
+    this.#snapPlannerPage();
     this.render();
-    // Run scan for the newly selected rule
     await this.#runScan();
     this.render();
   }
 
   static async #duplicateRule(event, target) {
-    const id = target.closest('[data-rule-id]')?.dataset.ruleId;
+    const id     = target.closest('[data-rule-id]')?.dataset.ruleId;
     const source = this._rules.find(r => r.id === id);
     if (!source) return;
-    const copy = foundry.utils.deepClone(source);
-    copy.id = foundry.utils.randomID();
+    const copy  = foundry.utils.deepClone(source);
+    copy.id   = foundry.utils.randomID();
     copy.name = source.name + ' (copy)';
     this._rules.push(copy);
     this._selectedRuleId = copy.id;
@@ -774,30 +1715,346 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     this.render();
   }
 
+  static async #deleteRegion(event, target) {
+    const id   = target.closest('[data-region-id]')?.dataset.regionId;
+    const rule = this.selectedRule;
+    if (!id || !rule) return;
+    rule.regions = (rule.regions ?? []).filter(r => r.id !== id);
+    this.#schedulePreview();
+    this.render();
+  }
+
+  static async #autoDetectRegions() {
+    const rule = this.selectedRule;
+    if (!this._pdf || !rule?.pages) {
+      ui.notifications.warn('Load a PDF and set a page range first.');
+      return;
+    }
+    try {
+      const { extractPages, parsePageString, mergePageItems, detectTables } =
+        await import('../pdf-parser.js');
+      const pageNums = parsePageString(rule.pages, this._pdf.numPages);
+      const pages    = await extractPages(this._pdf, pageNums);
+      const allItems = mergePageItems(pages);
+      const result   = detectTables(allItems);
+
+      rule.regions ??= [];
+      let added = 0;
+
+      for (const table of result.tables) {
+        // Compute bounding box of all items in this table
+        const tableItems = allItems.filter(item =>
+          table.rows.some(row => row.cells.some(c => c.value && item.text.includes(c.value)))
+        );
+        if (!tableItems.length) continue;
+
+        const xs = tableItems.map(i => i.x);
+        const ys = tableItems.map(i => i.y);
+        const x  = Math.min(...xs) - 5;
+        const y  = Math.min(...ys) - 5;
+        const w  = Math.max(...tableItems.map(i => i.x + (i.width ?? 0))) - x + 5;
+        const h  = Math.max(...ys) - y + 20;
+
+        // Determine which page this table is on (use page of first item)
+        const firstItem = tableItems[0];
+        const page      = firstItem?.page ?? pageNums[0];
+
+        const count = rule.regions.filter(r => r.type === 'table').length + 1 + added;
+        rule.regions.push({
+          id: foundry.utils.randomID(),
+          type: 'table', group: `table-${count}`,
+          page, x: Math.round(x), y: Math.round(y),
+          w: Math.round(w), h: Math.round(h),
+          label: `Table ${count}`
+        });
+        added++;
+      }
+
+      if (added) {
+        ui.notifications.info(`Auto-detected ${added} table region(s).`);
+        this.render();
+      } else {
+        ui.notifications.warn('No tables detected. Try drawing regions manually.');
+      }
+    } catch (err) {
+      ui.notifications.error(`Auto-detect failed: ${err.message}`);
+      console.error(err);
+    }
+  }
+
   static async #refreshPreview() {
     await this.#runPreview();
   }
 
-  static async #buildItems() {
-    if (!this._pdf) {
-      ui.notifications.warn('Load a PDF first.');
-      return;
-    }
-
+  static async #testRun() {
     const hasPreviews = this._rules.some(r => (this._preview[r.id]?.length ?? 0) > 0);
     if (!hasPreviews) {
-      ui.notifications.warn('No items detected. Check your rules and refresh the preview.');
+      ui.notifications.warn('Run a Refresh first so there are items to validate.');
       return;
     }
 
-    const folder = this._selectedFolderId
-      ? game.folders.get(this._selectedFolderId) ?? null
-      : null;
+    this._testErrors = {};
+    const ItemClass = CONFIG.Item.documentClass;
+
+    // Suppress Foundry notification toasts during validation
+    const origError = ui.notifications.error.bind(ui.notifications);
+    const origWarn  = ui.notifications.warn.bind(ui.notifications);
+    const origInfo  = ui.notifications.info.bind(ui.notifications);
+    ui.notifications.error = () => {};
+    ui.notifications.warn  = () => {};
+    ui.notifications.info  = () => {};
+
+    try {
+      for (const rule of this._rules) {
+        const rawItems = this._preview[rule.id];
+        if (!rawItems?.length || !rule.itemType) continue;
+        const ignoredKeys = new Set((rule.ignoredItems ?? []).map(i => i._dibKey));
+
+        for (const [idx, parsed] of rawItems.entries()) {
+          const dibKey = `_${idx}`;
+          if (ignoredKeys.has(dibKey)) continue;
+
+          // Apply overrides so test reflects the same data that would be built
+          const effective = Object.assign({}, parsed);
+          const ovr = this._cellOverrides[rule.id]?.[dibKey] ?? {};
+          for (const [f, v] of Object.entries(ovr)) effective[f] = v;
+
+          // Build the same data structure as buildItems does
+          const doc = { name: String(effective.name ?? 'Unnamed Item').trim() || 'Unnamed Item',
+                        type: rule.itemType, system: {} };
+          for (const [field, value] of Object.entries(effective)) {
+            if (['name','type','folder','_key','_dibKey'].includes(field)) continue;
+            if (field.startsWith('_')) continue;
+            if (field.startsWith('system.')) foundry.utils.setProperty(doc, field, value);
+            else doc[field] = value;
+          }
+
+          // Test: construct in memory — triggers DataModel schema validation
+          let rowError = null;
+          let fieldErrors = {};
+          try {
+            new ItemClass(doc, { parent: null });
+          } catch (err) {
+            rowError = err.message ?? String(err);
+            // DataModelValidationError exposes per-field errors
+            const rawFields = err.fields ?? err.errors ?? {};
+            for (const [fp, fe] of Object.entries(rawFields)) {
+              const norm = fp.includes('.') ? fp : `system.${fp}`;
+              fieldErrors[norm] = fe?.message ?? fe?.toString() ?? rowError;
+            }
+          }
+
+          if (rowError) {
+            if (!this._testErrors[rule.id])         this._testErrors[rule.id] = {};
+            if (!this._testErrors[rule.id][dibKey]) this._testErrors[rule.id][dibKey] = {};
+            this._testErrors[rule.id][dibKey]._row = rowError;
+
+            // If no structured field map, isolate by testing each mapped field individually
+            if (!Object.keys(fieldErrors).length) {
+              for (const attr of rule.attributes) {
+                if (!attr.foundryField) continue;
+                const val = foundry.utils.getProperty(doc, attr.foundryField);
+                if (val === undefined) continue;
+                const minDoc = { name: doc.name, type: rule.itemType };
+                foundry.utils.setProperty(minDoc, attr.foundryField, val);
+                try { new ItemClass(minDoc, { parent: null }); }
+                catch (fe) { fieldErrors[attr.foundryField] = fe.message ?? String(fe); }
+              }
+            }
+
+            Object.assign(this._testErrors[rule.id][dibKey], fieldErrors);
+          }
+        }
+      }
+    } finally {
+      ui.notifications.error = origError;
+      ui.notifications.warn  = origWarn;
+      ui.notifications.info  = origInfo;
+    }
+
+    const errorCount = Object.values(this._testErrors)
+      .reduce((n, items) => n + Object.values(items).filter(f => f._row).length, 0);
+
+    // Switch to Items Preview tab so errors are visible
+    this._rightTab = 'preview';
+
+    if (errorCount === 0) {
+      ui.notifications.info('Test Run: All items passed validation.');
+    } else {
+      ui.notifications.warn(`Test Run: ${errorCount} item(s) have validation errors — see red rows in Items Preview.`);
+    }
+    this.render();
+  }
+
+  // ── Suggested Links actions ──────────────────────────────────────────────
+
+  // ── Attribute mapping actions ────────────────────────────────────────────
+
+  static async #openAttributeMenu(event, target) {
+    const foundryField = target.dataset.foundryField;
+    const rule = this.selectedRule;
+    if (!rule || !foundryField) return;
+
+    const mapping  = rule.attributes.find(a => a.foundryField === foundryField && a.columnHeader);
+    const inPreview = (rule.manualColumns ?? []).includes(foundryField);
+    const menuItems = [
+      {
+        icon: 'fa-search',
+        label: 'Inspect / Edit Mapping',
+        action: () => this.#showAttributeDialog(foundryField)
+      }
+    ];
+    if (mapping) {
+      menuItems.push({
+        icon: 'fa-unlink',
+        label: `Remove Link  (${mapping.columnHeader})`,
+        action: () => {
+          rule.attributes = rule.attributes.filter(
+            a => !(a.foundryField === foundryField && a.columnHeader === mapping.columnHeader)
+          );
+          this.#schedulePreview();
+          this.render();
+        }
+      });
+    } else if (inPreview) {
+      menuItems.push({
+        icon: 'fa-eye-slash',
+        label: 'Remove from Preview',
+        action: () => {
+          rule.manualColumns = (rule.manualColumns ?? []).filter(p => p !== foundryField);
+          this.render();
+        }
+      });
+    } else {
+      menuItems.push({
+        icon: 'fa-eye',
+        label: 'Add to Preview',
+        action: () => {
+          rule.manualColumns = [...(rule.manualColumns ?? []), foundryField];
+          this.render();
+        }
+      });
+    }
+    this.#showContextMenu(event, menuItems);
+  }
+
+  static async #acceptSuggestion(event, target) {
+    const rule   = this.selectedRule;
+    const header = target.dataset.columnHeader;
+    const field  = target.dataset.suggestedField;
+    if (!rule || !header || !field) return;
+    if (!rule.attributes.some(a => a.columnHeader === header && a.foundryField === field)) {
+      rule.attributes.push({ ...makeDefaultAttribute(), columnHeader: header, foundryField: field });
+      this.#schedulePreview();
+      this.render();
+    }
+  }
+
+  static async #linkAllSuggestions(event, target) {
+    const rule = this.selectedRule;
+    if (!rule || !this._scanData) return;
+    const attrPaths = this._cachedAttributePaths ?? [];
+    if (!attrPaths.length) return;
+    const suggestions = computeSuggestionsForRule(rule, this._scanData, attrPaths);
+    let added = 0;
+    for (const s of suggestions) {
+      if (!rule.attributes.some(a => a.columnHeader === s.columnHeader && a.foundryField === s.suggestedField)) {
+        rule.attributes.push({ ...makeDefaultAttribute(), columnHeader: s.columnHeader, foundryField: s.suggestedField });
+        added++;
+      }
+    }
+    if (added > 0) { this.#schedulePreview(); this.render(); }
+  }
+
+  async #showAttributeDialog(foundryField) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+
+    const existing = rule.attributes.find(a => a.foundryField === foundryField && a.columnHeader);
+    const columns  = [...new Set(
+      this._scanData?.tables?.flatMap(t => t.columns.map(c => c.header)).filter(h => h) ?? []
+    )];
+
+    const colOpts = columns.map(h =>
+      `<option value="${h.replace(/"/g, '&quot;')}"${existing?.columnHeader === h ? ' selected' : ''}>${h}</option>`
+    ).join('');
+    const txOpts = [
+      ['trim','Trim whitespace'], ['number','Number'], ['lowercase','Lowercase'],
+      ['uppercase','Uppercase'],  ['boolean','Boolean (yes/true/1/x)']
+    ].map(([v, l]) =>
+      `<option value="${v}"${(existing?.transform ?? 'trim') === v ? ' selected' : ''}>${l}</option>`
+    ).join('');
+
+    const content = `
+      <div style="display:flex;flex-direction:column;gap:10px;padding:4px 0">
+        <div>
+          <div style="font-size:0.75em;color:#9494a0;margin-bottom:2px">Foundry Field</div>
+          <div style="font-family:monospace;font-size:0.9em;color:#7ab0d4">${foundryField}</div>
+        </div>
+        <div>
+          <label style="display:block;font-size:0.8em;color:#9494a0;margin-bottom:3px">Column Header</label>
+          <select id="dib-dlg-col" style="width:100%">
+            <option value="">— Remove mapping —</option>
+            ${colOpts}
+          </select>
+        </div>
+        <div>
+          <label style="display:block;font-size:0.8em;color:#9494a0;margin-bottom:3px">Transform</label>
+          <select id="dib-dlg-tx" style="width:100%">${txOpts}</select>
+        </div>
+      </div>`;
+
+    const result = await foundry.applications.api.DialogV2.prompt({
+      window: { title: `Map: ${foundryField.split('.').pop()}` },
+      content,
+      ok: {
+        label: 'Save',
+        callback: (_e, _btn, dlg) => ({
+          column:    dlg.element.querySelector('#dib-dlg-col').value,
+          transform: dlg.element.querySelector('#dib-dlg-tx').value
+        })
+      },
+      rejectClose: false
+    });
+    if (!result) return;
+
+    rule.attributes = rule.attributes.filter(a => a.foundryField !== foundryField);
+    if (result.column) {
+      rule.attributes.push({
+        ...makeDefaultAttribute(), foundryField,
+        columnHeader: result.column, transform: result.transform
+      });
+    }
+    this.#schedulePreview();
+    this.render();
+  }
+
+  static async #buildItems() {
+    if (!this._pdf) { ui.notifications.warn('Load a PDF first.'); return; }
+    const hasPreviews = this._rules.some(r => (this._preview[r.id]?.length ?? 0) > 0);
+    if (!hasPreviews) { ui.notifications.warn('No items detected. Check your rules and refresh.'); return; }
 
     let total = 0;
     for (const rule of this._rules) {
-      const items = this._preview[rule.id];
-      if (!items?.length || !rule.itemType) continue;
+      const rawItems = this._preview[rule.id];
+      if (!rawItems?.length || !rule.itemType) continue;
+
+      // Apply ignored-item filter and cell overrides — same logic as _prepareContext
+      const ignoredKeys = new Set((rule.ignoredItems ?? []).map(i => i._dibKey));
+      const items = rawItems
+        .map((item, idx) => {
+          const dibKey = `_${idx}`;
+          if (ignoredKeys.has(dibKey)) return null;
+          const effective = { ...item };
+          const ovr = this._cellOverrides[rule.id]?.[dibKey] ?? {};
+          for (const [f, v] of Object.entries(ovr)) effective[f] = v;
+          return effective;
+        })
+        .filter(Boolean);
+
+      if (!items.length) continue;
+      const folderId = rule.folderId || this._selectedFolderId;
+      const folder   = folderId ? game.folders.get(folderId) ?? null : null;
       try {
         const created = await buildItems(items, rule.itemType, folder);
         total += created.length;
@@ -806,46 +2063,33 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         console.error(err);
       }
     }
-
     ui.notifications.info(`Dynamic Item Builder | Created ${total} item(s).`);
   }
 
   static async #exportRules() {
     const data = {
-      _dibVersion: '1.0',
-      system: game.system.id,
+      _dibVersion: '1.0', system: game.system.id,
       exportedAt: new Date().toISOString(),
       rules: this._rules.map(r => foundry.utils.deepClone(r))
     };
-
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = Object.assign(document.createElement('a'), {
-      href: url,
-      download: `dib-rules-${game.system.id}-${Date.now()}.json`
+    const url  = URL.createObjectURL(blob);
+    const a    = Object.assign(document.createElement('a'), {
+      href: url, download: `dib-rules-${game.system.id}-${Date.now()}.json`
     });
     a.click();
     URL.revokeObjectURL(url);
   }
 
   static async #importRules() {
-    const input = Object.assign(document.createElement('input'), {
-      type: 'file',
-      accept: '.json'
-    });
+    const input = Object.assign(document.createElement('input'), { type: 'file', accept: '.json' });
     input.addEventListener('change', async e => {
       const file = e.target.files?.[0];
       if (!file) return;
       try {
-        const data = JSON.parse(await file.text());
+        const data     = JSON.parse(await file.text());
         if (!Array.isArray(data.rules)) throw new Error('Missing "rules" array.');
-
-        const imported = data.rules.map(r => ({
-          ...makeDefaultRule(),
-          ...r,
-          id: foundry.utils.randomID() // fresh IDs to avoid collisions
-        }));
-
+        const imported = data.rules.map(r => ({ ...makeDefaultRule(), ...r, id: foundry.utils.randomID() }));
         this._rules.push(...imported);
         this._selectedRuleId = imported[0]?.id ?? this._selectedRuleId;
         ui.notifications.info(`Imported ${imported.length} rule(s) from "${file.name}".`);
@@ -874,34 +2118,21 @@ function getSystemItemTypes() {
 }
 
 async function getItemAttributePaths(itemType) {
-  const paths = [
-    { path: 'name', label: 'Name' },
-    { path: 'img',  label: 'Image' }
-  ];
-
+  const paths = [{ path: 'name', label: 'Name' }, { path: 'img', label: 'Image' }];
   if (!itemType) return paths;
-
-  // Try system template first (most compatible)
   const template = game.system.template?.Item?.[itemType] ?? {};
   const flat = foundry.utils.flattenObject(template);
-  for (const key of Object.keys(flat)) {
-    paths.push({ path: `system.${key}`, label: key });
-  }
+  for (const key of Object.keys(flat)) paths.push({ path: `system.${key}`, label: key });
 
-  // If the system uses DataModel (v11+) and no template entries found,
-  // try constructing a temporary item to inspect its schema fields.
   if (paths.length <= 2 && game.documentTypes?.Item?.includes(itemType)) {
     try {
       const tmp = new Item({ name: '_tmp', type: itemType });
       const sysFlat = foundry.utils.flattenObject(tmp.toObject().system ?? {});
       for (const key of Object.keys(sysFlat)) {
-        if (!paths.some(p => p.path === `system.${key}`)) {
-          paths.push({ path: `system.${key}`, label: key });
-        }
+        if (!paths.some(p => p.path === `system.${key}`)) paths.push({ path: `system.${key}`, label: key });
       }
     } catch { /* ignore */ }
   }
-
   return paths;
 }
 
@@ -909,50 +2140,40 @@ async function getItemAttributePaths(itemType) {
 // Default factories
 // -------------------------------------------------------------------------
 
-/** Escape a string for use as a literal regex fragment */
 function _esc(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function makeDefaultRule() {
   return {
-    id: foundry.utils.randomID(),
-    name: 'New Rule',
-    itemType: '',
-    pages: '1',
-    contentType: 'table',
-    headerPattern: '',
+    id:                  foundry.utils.randomID(),
+    name:                'New Rule',
+    itemType:            '',
+    pages:               '1',
+    folderId:            '',
+    contentType:         'table',
+    headerPattern:       '',
     rowDetectionPattern: '',
-    skipPattern: '',
-    fontFilter: { name: '', minSize: '', maxSize: '' },
-    mixedConfig: { tableXMin: 0, tableXMax: 9999, textXMin: 0, textXMax: 9999 },
-    descriptionField: '',
-    attributes: [],
-    ignoredItems: []
+    skipPattern:         '',
+    fontFilter:          { name: '', minSize: '', maxSize: '' },
+    attributes:          [],
+    ignoredItems:        [],
+    regions:             [],
+    manualColumns:       [],
+    manualHeaders:       {}
   };
 }
 
 function makeDefaultAttribute() {
   return {
-    foundryField: '',
-    columnHeader: '',
-    columnIndex: '',
-    pattern: '',
-    flags: 'i',
-    group: 1,
-    transform: 'trim'
+    foundryField: '', columnHeader: '', columnIndex: '',
+    pattern: '', flags: 'i', group: 1, transform: 'trim'
   };
 }
 
 // -------------------------------------------------------------------------
 // Constants
 // -------------------------------------------------------------------------
-
-const CONTENT_TYPES = [
-  { value: 'table',  label: 'Table (grid layout)' },
-  { value: 'column', label: 'Column Text (prose)' },
-  { value: 'mixed',  label: 'Mixed (table + prose)' }
-];
 
 const TRANSFORMS = [
   { value: 'trim',      label: 'Trim whitespace' },
@@ -961,3 +2182,119 @@ const TRANSFORMS = [
   { value: 'uppercase', label: 'Uppercase' },
   { value: 'boolean',   label: 'Boolean (yes/true/1/x)' }
 ];
+
+// -------------------------------------------------------------------------
+// Attribute suggestion helpers
+// -------------------------------------------------------------------------
+
+/**
+ * Score how well a column header text matches an attribute path (0–1).
+ * Handles camelCase paths, abbreviations, and parenthetical suffixes like "(GP)".
+ */
+function scoreAttributeMatch(header, attrPath) {
+  if (!header || !attrPath) return 0;
+  const norm = s => s
+    .replace(/([a-z])([A-Z])/g, '$1 $2')   // split camelCase → words
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')           // strip punctuation/parens
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const h      = norm(header);
+  const last   = norm(attrPath.split('.').pop());
+  if (!h || !last) return 0;
+
+  // Exact match
+  if (h === last) return 1.0;
+
+  const hWords = h.split(' ').filter(w => w.length >= 2);
+  const lWords = last.split(' ').filter(w => w.length >= 1);
+  if (!hWords.length || !lWords.length) return 0;
+
+  // Every attribute word is covered by a header word (exact or shared prefix ≥3 chars)
+  const allCovered = lWords.every(lw =>
+    hWords.some(hw =>
+      hw === lw ||
+      (hw.length >= 3 && lw.startsWith(hw)) ||
+      (lw.length >= 3 && hw.startsWith(lw))
+    )
+  );
+  if (allCovered) return 0.9;
+
+  // Partial word overlap score
+  let matched = 0;
+  for (const hw of hWords) {
+    if (lWords.some(lw =>
+      lw === hw ||
+      (hw.length >= 3 && lw.startsWith(hw)) ||
+      (lw.length >= 3 && hw.startsWith(lw))
+    )) matched++;
+  }
+  if (!matched) return 0;
+  return (matched / Math.max(hWords.length, lWords.length)) * 0.75;
+}
+
+/**
+ * Compute suggested column→field mappings for a rule from its detected table
+ * columns and the available item attribute paths.
+ */
+function computeSuggestionsForRule(rule, scanData, attrPaths) {
+  const allHeaders = [...new Set(
+    scanData.tables.flatMap(t => t.columns.map(c => c.header)).filter(h => h)
+  )];
+  if (!allHeaders.length || !attrPaths.length) return [];
+
+  const MIN_SCORE = 0.4;
+  const suggestions = [];
+
+  for (let i = 0; i < allHeaders.length; i++) {
+    const header = allHeaders[i];
+    let bestPath  = null;
+    let bestScore = 0;
+
+    for (const attr of attrPaths) {
+      let score = scoreAttributeMatch(header, attr.path);
+      // First column is almost always the item name — boost it
+      if (i === 0 && attr.path === 'name') score = Math.max(score, 0.80);
+      // Explicit "name" word in header → strong hint
+      if (/\bname\b/i.test(header) && attr.path === 'name') score = Math.max(score, 0.95);
+      if (score > bestScore) { bestScore = score; bestPath = attr.path; }
+    }
+
+    const threshold = i === 0 ? 0.5 : MIN_SCORE;
+    if (!bestPath || bestScore < threshold) continue;
+
+    const alreadyLinked = rule.attributes.some(a => a.columnHeader === header && a.foundryField);
+    suggestions.push({
+      columnHeader:   header,
+      suggestedField: bestPath,
+      score:          bestScore,
+      scoreLabel:     bestScore >= 0.9 ? 'High' : bestScore >= 0.65 ? 'Med' : 'Low',
+      scoreClass:     bestScore >= 0.9 ? 'high' : bestScore >= 0.65 ? 'med' : 'low',
+      alreadyLinked
+    });
+  }
+
+  return suggestions;
+}
+
+/**
+ * Return a shallow copy of scanData with each column enriched with a `status`
+ * field: 'linked' | 'suggested' | 'none'.
+ */
+function enrichScanDataColumns(scanData, rule, suggestions) {
+  if (!scanData) return null;
+  return {
+    ...scanData,
+    tables: scanData.tables.map(table => ({
+      ...table,
+      columns: table.columns.map(col => {
+        if (!col.header) return { ...col, status: 'none' };
+        const linked    = rule?.attributes.some(a => a.columnHeader === col.header && a.foundryField);
+        if (linked) return { ...col, status: 'linked' };
+        const suggested = suggestions.some(s => s.columnHeader === col.header);
+        return { ...col, status: suggested ? 'suggested' : 'none' };
+      })
+    }))
+  };
+}

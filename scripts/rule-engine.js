@@ -3,7 +3,7 @@
  * an array of detected items: [{ name, [foundryField]: value, ... }]
  */
 
-import { extractPages, parsePageString, mergePageItems, groupIntoRows, detectColumns, mapRowsToCells } from './pdf-parser.js';
+import { extractPages, parsePageString, mergePageItems, detectColumns, mapRowsToCells, detectTables, applyManualHeaderOverrides, applyColumnSplits } from './pdf-parser.js';
 
 /**
  * Apply a rule to a loaded PDF document.
@@ -13,18 +13,97 @@ import { extractPages, parsePageString, mergePageItems, groupIntoRows, detectCol
  */
 export async function applyRule(rule, pdfDoc) {
   const pageNums = parsePageString(rule.pages ?? '1', pdfDoc.numPages);
-  const pages = await extractPages(pdfDoc, pageNums);
-  let items = mergePageItems(pages);
+  const pages    = await extractPages(pdfDoc, pageNums);
 
-  // Apply optional font filter
-  items = applyFontFilter(items, rule.fontFilter);
-
-  switch (rule.contentType) {
-    case 'table':  return parseTable(items, rule);
-    case 'column': return parseColumn(items, rule);
-    case 'mixed':  return parseMixed(items, rule);
-    default:       return parseTable(items, rule);
+  // Region-based path: when the user has painted table regions, use the same
+  // detectTables() pipeline as the Table Preview so column structure is identical.
+  const tableRegions = (rule.regions ?? []).filter(r => r.type === 'table');
+  if (tableRegions.length > 0) {
+    return applyRuleWithRegions(rule, pages, tableRegions);
   }
+
+  // Auto-detect fallback (no regions defined)
+  let items = mergePageItems(pages);
+  items = applyFontFilter(items, rule.fontFilter);
+  return parseTable(items, rule);
+}
+
+/**
+ * Region-aware extraction path.
+ * Mirrors the collation logic in DynamicItemBuilderApp.#scanTableRegions so that
+ * the column structure seen in Table Preview exactly matches what is extracted here.
+ */
+function applyRuleWithRegions(rule, pages, regions) {
+  // Group regions by their `group` key, in page→Y order
+  const groups = new Map();
+  for (const region of [...regions].sort((a, b) => a.page - b.page || a.y - b.y)) {
+    if (!groups.has(region.group)) groups.set(region.group, []);
+    groups.get(region.group).push(region);
+  }
+
+  // Collect all tables across groups then re-index — mirrors
+  // DynamicItemBuilderApp.#scanTableRegions so table IDs stay consistent
+  // between the Table Preview and the extraction path.
+  const allTables = [];
+  for (const [, groupRegions] of groups) {
+    let yOffset    = 0;
+    const groupItems = [];
+
+    for (const region of groupRegions) {
+      const page = pages.find(p => p.pageNum === region.page);
+      if (!page) continue;
+      const regionItems = page.items.filter(item =>
+        item.x >= region.x            &&
+        item.x <= region.x + region.w &&
+        item.y >= region.y            &&
+        item.y <= region.y + region.h
+      );
+      for (const item of regionItems) {
+        groupItems.push({ ...item, y: item.y + yOffset });
+      }
+      if (regionItems.length) {
+        yOffset += Math.max(...regionItems.map(i => i.y)) + 50;
+      }
+    }
+
+    if (!groupItems.length) continue;
+    allTables.push(...detectTables(groupItems).tables);
+  }
+
+  // Re-index (must match DynamicItemBuilderApp.#scanTableRegions)
+  allTables.forEach((t, i) => { t.id = `tbl-${i}`; });
+
+  // Apply the same transforms as the Table Preview so attribute mappings align
+  applyManualHeaderOverrides(allTables, rule.manualHeaders);
+  applyColumnSplits(allTables, rule.columnSplits);
+
+  const skipRe  = rule.skipPattern?.trim() ? safeRegex(rule.skipPattern) : null;
+  const results = [];
+
+  for (const table of allTables) {
+    const colIndexMap = {};
+    table.columns.forEach((col, i) => { colIndexMap[col.header] = i; });
+
+    for (const row of table.rows) {
+      // Skip injected header rows and section-label rows added by merge/split logic
+      if (row._injected || row._sectionHeader) continue;
+
+      const cells = {};
+      for (const cell of row.cells) {
+        cells[cell.column] = cell.value;
+        cells[`_col${colIndexMap[cell.column] ?? 0}`] = cell.value;
+      }
+
+      const rowText = row.rawText ?? Object.values(cells).join(' ').trim();
+      if (!rowText.trim()) continue;
+      if (skipRe?.test(rowText)) continue;
+
+      const item = extractAttributes(cells, rule.attributes, rule);
+      if (item) results.push(item);
+    }
+  }
+
+  return results;
 }
 
 // ---------------------------------------------------------------------------
@@ -82,92 +161,18 @@ function parseTable(items, rule) {
     if (!rowText) continue;
     if (skipRe?.test(rowText)) continue;
 
-    const item = extractAttributes(cells, rule.attributes, 'table', rule);
+    const item = extractAttributes(cells, rule.attributes, rule);
     if (item) results.push(item);
   }
 
   return results;
-}
-
-// ---------------------------------------------------------------------------
-// Column / prose parser
-// ---------------------------------------------------------------------------
-
-function parseColumn(items, rule) {
-  if (!rule.rowDetectionPattern?.trim()) return [];
-
-  // Build full text preserving approximate line breaks
-  const sorted = [...items].sort((a, b) => a.y - b.y || a.x - b.x);
-  const fullText = buildFullText(sorted);
-
-  const startRe = safeRegex(rule.rowDetectionPattern, 'gm');
-  if (!startRe) return [];
-
-  const matches = [...fullText.matchAll(startRe)];
-  if (matches.length === 0) return [];
-
-  const skipRe = rule.skipPattern?.trim() ? safeRegex(rule.skipPattern) : null;
-  const results = [];
-
-  for (let i = 0; i < matches.length; i++) {
-    const start = matches[i].index;
-    const end = matches[i + 1]?.index ?? fullText.length;
-    const chunk = fullText.slice(start, end);
-
-    if (skipRe?.test(chunk)) continue;
-
-    const context = { _raw: chunk, _match: matches[i] };
-    const item = extractAttributes(context, rule.attributes, 'column', rule);
-    if (item) results.push(item);
-  }
-
-  return results;
-}
-
-// ---------------------------------------------------------------------------
-// Mixed parser (table data + column descriptions)
-// ---------------------------------------------------------------------------
-
-function parseMixed(items, rule) {
-  const cfg = rule.mixedConfig ?? {};
-  const { tableXMin = 0, tableXMax = 9999, textXMin = 0, textXMax = 9999 } = cfg;
-
-  const tableItems = items.filter(i => i.x >= tableXMin && i.x <= tableXMax);
-  const textItems  = items.filter(i => i.x >= textXMin  && i.x <= textXMax);
-
-  // Parse structure from table
-  const tableResults = parseTable(tableItems, rule);
-
-  // Optionally augment with prose descriptions keyed by item name
-  if (rule.descriptionField && textItems.length > 0) {
-    const rows = groupIntoRows(textItems);
-    const fullText = buildFullText(rows.flatMap(r => r.items));
-
-    if (rule.rowDetectionPattern?.trim()) {
-      const startRe = safeRegex(rule.rowDetectionPattern, 'gm');
-      if (startRe) {
-        const matches = [...fullText.matchAll(startRe)];
-        for (const tableItem of tableResults) {
-          const nameVal = tableItem.name ?? '';
-          const m = matches.find(m => m[0].toLowerCase().includes(nameVal.toLowerCase()));
-          if (m) {
-            const start = m.index;
-            const end = (matches[matches.indexOf(m) + 1]?.index) ?? fullText.length;
-            setNestedValue(tableItem, rule.descriptionField, fullText.slice(start, end).trim());
-          }
-        }
-      }
-    }
-  }
-
-  return tableResults;
 }
 
 // ---------------------------------------------------------------------------
 // Attribute extraction
 // ---------------------------------------------------------------------------
 
-function extractAttributes(context, attributeRules, mode, rule) {
+function extractAttributes(context, attributeRules, rule) {
   const result = {};
   let hasData = false;
 
@@ -176,16 +181,11 @@ function extractAttributes(context, attributeRules, mode, rule) {
 
     let value = '';
 
-    if (mode === 'table') {
-      // Prefer named column, fall back to column index
-      if (attrRule.columnHeader) {
-        value = context[attrRule.columnHeader] ?? context[`_col${attrRule.columnIndex}`] ?? '';
-      } else if (attrRule.columnIndex != null && attrRule.columnIndex !== '') {
-        value = context[`_col${attrRule.columnIndex}`] ?? '';
-      }
-    } else {
-      // Column / raw text mode
-      value = context._raw ?? '';
+    // Prefer named column, fall back to column index
+    if (attrRule.columnHeader) {
+      value = context[attrRule.columnHeader] ?? context[`_col${attrRule.columnIndex}`] ?? '';
+    } else if (attrRule.columnIndex != null && attrRule.columnIndex !== '') {
+      value = context[`_col${attrRule.columnIndex}`] ?? '';
     }
 
     // Optionally refine with a regex
@@ -216,19 +216,6 @@ function safeRegex(pattern, flags = '') {
   } catch {
     return null;
   }
-}
-
-function buildFullText(items) {
-  // Insert newlines between items whose Y differs significantly
-  let text = '';
-  let lastY = null;
-  for (const item of items) {
-    if (lastY !== null && Math.abs(item.y - lastY) > 6) text += '\n';
-    else if (text && !text.endsWith('\n')) text += ' ';
-    text += item.text;
-    lastY = item.y;
-  }
-  return text;
 }
 
 function applyTransform(value, transform) {
