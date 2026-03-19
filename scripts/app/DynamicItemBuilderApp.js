@@ -1413,6 +1413,34 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
           });
           if (changed > 0) this.render();
         }
+      },
+      {
+        icon: 'fa-hashtag',
+        label: 'Convert to integer',
+        action: () => {
+          const rule        = this._rules.find(r => r.id === ruleId);
+          const ignoredKeys = new Set((rule?.ignoredItems ?? []).map(i => i._dibKey));
+          const items       = this._preview[ruleId] ?? [];
+          let changed = 0;
+          items.forEach((item, idx) => {
+            const dibKey = `_${idx}`;
+            if (ignoredKeys.has(dibKey)) return;
+            const flat   = foundry.utils.flattenObject(item);
+            const cur    = this._cellOverrides[ruleId]?.[dibKey]?.[field] !== undefined
+              ? String(this._cellOverrides[ruleId][dibKey][field])
+              : (flat[field] != null ? String(flat[field]) : null);
+            if (cur === null) return;
+            const stripped = cur.replace(/,/g, '');
+            const parsed   = parseInt(stripped, 10);
+            const next     = isNaN(parsed) ? cur : String(parsed);
+            if (next === cur) return;
+            if (!this._cellOverrides[ruleId])         this._cellOverrides[ruleId] = {};
+            if (!this._cellOverrides[ruleId][dibKey]) this._cellOverrides[ruleId][dibKey] = {};
+            this._cellOverrides[ruleId][dibKey][field] = next;
+            changed++;
+          });
+          if (changed > 0) this.render();
+        }
       }
     ]);
   }

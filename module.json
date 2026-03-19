@@ -12,10 +12,28 @@
       "flags": {}
     }
   ],
-  "esmodules": ["scripts/main.js"],
-  "styles": ["styles/dynamic-item-builder.css"],
+  "esmodules": [
+    "scripts/main.js"
+  ],
+  "styles": [
+    {
+      "src": "styles/dynamic-item-builder.css"
+    }
+  ],
   "flags": {
     "canUpload": true
   },
-  "description": "Import items from PDF rulebooks using configurable regex and table-parsing rules. Define rules per item type, preview results live, then batch-create Foundry items."
+  "description": "<p>Import items from PDF rulebooks using configurable regex and table-parsing rules. Define rules per item type, preview results live, then batch-create Foundry items.</p>",
+  "packs": [
+    {
+      "name": "ddf-dynamic-item-builder",
+      "label": "Guide: Dynamic Item Builder",
+      "path": "packs/ddf-dynamic-item-builder",
+      "type": "JournalEntry",
+      "ownership": {
+        "PLAYER": "OBSERVER",
+        "ASSISTANT": "OWNER"
+      }
+    }
+  ]
 }
