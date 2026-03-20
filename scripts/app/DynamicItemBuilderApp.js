@@ -2394,7 +2394,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 // -------------------------------------------------------------------------
 
 function getSystemItemTypes() {
-  const types = game.documentTypes?.Item ?? Object.keys(game.system.template?.Item ?? {});
+  const types = game.documentTypes?.Item ?? [];
   return types
     .filter(t => t !== 'base' && t !== 'types')
     .map(t => ({ value: t, label: t.charAt(0).toUpperCase() + t.slice(1) }));
@@ -2403,19 +2403,17 @@ function getSystemItemTypes() {
 async function getItemAttributePaths(itemType) {
   const paths = [{ path: 'name', label: 'Name' }, { path: 'img', label: 'Image' }];
   if (!itemType) return paths;
-  const template = game.system.template?.Item?.[itemType] ?? {};
-  const flat = foundry.utils.flattenObject(template);
-  for (const key of Object.keys(flat)) paths.push({ path: `system.${key}`, label: key });
 
-  if (paths.length <= 2 && game.documentTypes?.Item?.includes(itemType)) {
-    try {
-      const tmp = new Item({ name: '_tmp', type: itemType });
-      const sysFlat = foundry.utils.flattenObject(tmp.toObject().system ?? {});
-      for (const key of Object.keys(sysFlat)) {
-        if (!paths.some(p => p.path === `system.${key}`)) paths.push({ path: `system.${key}`, label: key });
-      }
-    } catch { /* ignore */ }
-  }
+  // Instantiate a temporary item of the target type to get its data model — this
+  // works in v12+ without touching the deprecated game.system.template API.
+  try {
+    const tmp = new Item({ name: '_tmp', type: itemType });
+    const sysFlat = foundry.utils.flattenObject(tmp.toObject().system ?? {});
+    for (const key of Object.keys(sysFlat)) {
+      paths.push({ path: `system.${key}`, label: key });
+    }
+  } catch { /* ignore — item type may not be valid yet */ }
+
   return paths;
 }
 
