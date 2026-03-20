@@ -9,7 +9,7 @@
 import {
   loadPDF, extractPages, parsePageString, mergePageItems,
   detectTables, renderPageToCanvas, applyColumnMerges, applyColumnSplits,
-  parseDescriptionBlock, applyStripRules, normalizeItemName
+  parseDescriptionBlock, parseTextFields, applyStripRules, normalizeItemName
 } from '../pdf-parser.js';
 import { applyRule }   from '../rule-engine.js';
 import { buildItems }  from '../item-builder.js';
@@ -47,7 +47,13 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       linkAllSuggestions:  DynamicItemBuilderApp.#linkAllSuggestions,
       testRun:             DynamicItemBuilderApp.#testRun,
       addTextRule:         DynamicItemBuilderApp.#addTextRule,
-      deleteTextRule:      DynamicItemBuilderApp.#deleteTextRule
+      deleteTextRule:      DynamicItemBuilderApp.#deleteTextRule,
+      addTextField:        DynamicItemBuilderApp.#addTextField,
+      deleteTextField:     DynamicItemBuilderApp.#deleteTextField,
+      moveTextField:       DynamicItemBuilderApp.#moveTextField,
+      addTextFieldRule:    DynamicItemBuilderApp.#addTextFieldRule,
+      deleteTextFieldRule: DynamicItemBuilderApp.#deleteTextFieldRule,
+      moveTextFieldRule:   DynamicItemBuilderApp.#moveTextFieldRule
     }
   };
 
@@ -165,6 +171,14 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       for (const path of (r.manualColumns ?? [])) {
         if (!linkedFields.has(path)) {
           cols.push({ field: path, label: path.split('.').pop(), manual: true });
+          linkedFields.add(path);
+        }
+      }
+      // Append text fields that have a Foundry attribute mapped
+      for (const tf of (r.textFields ?? [])) {
+        if (tf.foundryAttr && !linkedFields.has(tf.foundryAttr)) {
+          cols.push({ field: tf.foundryAttr, label: tf.header || tf.foundryAttr.split('.').pop() });
+          linkedFields.add(tf.foundryAttr);
         }
       }
 
@@ -399,7 +413,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       this.#updateRegionOverlay();
     });
 
-    // Text rule pattern inputs — update data only, no auto-refresh
+    // Legacy Name Rules inputs — update data only, no auto-refresh
     el.querySelector('.dib-text-rules-section')?.addEventListener('input', e => {
       const input = e.target.closest('.dib-text-rule-input');
       if (!input) return;
@@ -408,14 +422,35 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       if (tr) tr.pattern = input.value;
     });
 
-    // Text Preview: "Link to table" and "Create from Text" buttons
+    // Field Rules: input changes (header, foundryAttr, rule patterns) — no auto-refresh
+    el.querySelector('.dib-field-rules-section')?.addEventListener('input', e => {
+      const rule = this.selectedRule;
+      if (!rule) return;
+      const fieldEl = e.target.closest('[data-field-id]');
+      if (!fieldEl) return;
+      const tf = (rule.textFields ?? []).find(f => f.id === fieldEl.dataset.fieldId);
+      if (!tf) return;
+      const prop = e.target.dataset.fieldProp;
+      if (prop === 'header')      { tf.header      = e.target.value; return; }
+      if (prop === 'foundryAttr') { tf.foundryAttr = e.target.value; return; }
+      // Rule pattern input inside this field
+      const ruleEl = e.target.closest('[data-rule-id]');
+      if (ruleEl) {
+        const tr = (tf.rules ?? []).find(r => r.id === ruleEl.dataset.ruleId);
+        if (tr) tr.pattern = e.target.value;
+      }
+    });
+
+    // Text Preview: "Link to table", "Create from Text" buttons, and column header clicks
     el.querySelector('.dib-text-preview')?.addEventListener('click', e => {
       const linkBtn       = e.target.closest('[data-action="linkTextToTable"]');
       const standaloneBtn = e.target.closest('[data-action="createFromText"]');
       const removeLink    = e.target.closest('[data-action="removeTextLink"]');
-      if (linkBtn)       this.#linkTextToTable(linkBtn.dataset.regionId);
-      if (standaloneBtn) this.#setTextStandalone(standaloneBtn.dataset.regionId);
-      if (removeLink)    this.#removeTextLink(removeLink.dataset.regionId, removeLink.dataset.fieldKey);
+      if (linkBtn)       { this.#linkTextToTable(linkBtn.dataset.regionId); return; }
+      if (standaloneBtn) { this.#setTextStandalone(standaloneBtn.dataset.regionId); return; }
+      if (removeLink)    { this.#removeTextLink(removeLink.dataset.regionId, removeLink.dataset.fieldKey); return; }
+      const th = e.target.closest('.dib-text-preview-th');
+      if (th) this.#showTextColumnMenu(e, th);
     });
 
     // Scan cell clicks (Table Preview)
@@ -954,15 +989,8 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         this._scanData = detectTables(allItems);
       }
 
-      // Compute name rules from rule.textRules
-      const textRules  = rule.textRules ?? [];
-      const namePattern = textRules
-        .filter(r => r.type === 'target' && r.pattern?.trim())
-        .map(r => r.pattern.trim())
-        .join('|') || undefined;
-      const stripRules = textRules.filter(r => r.type === 'strip' && r.pattern?.trim());
-
       // Scan text regions
+      const textFields = rule.textFields?.length ? rule.textFields : null;
       this._textScanData = {};
       for (const region of textRegions) {
         const page = pages.find(p => p.pageNum === region.page);
@@ -970,8 +998,19 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         const regionItems = this.#filterItemsToRegion(page, region);
         if (!regionItems.length) continue;
 
-        const entries = parseDescriptionBlock(regionItems, { namePattern, useFont: true });
-        applyStripRules(entries, stripRules);
+        let entries;
+        if (textFields) {
+          entries = parseTextFields(regionItems, textFields);
+        } else {
+          const textRules   = rule.textRules ?? [];
+          const namePattern = textRules
+            .filter(r => r.type === 'target' && r.pattern?.trim())
+            .map(r => r.pattern.trim())
+            .join('|') || undefined;
+          const stripRules = textRules.filter(r => r.type === 'strip' && r.pattern?.trim());
+          entries = parseDescriptionBlock(regionItems, { namePattern, useFont: true });
+          applyStripRules(entries, stripRules);
+        }
         this._textScanData[region.id] = entries;
       }
     } catch (err) {
@@ -1080,65 +1119,139 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     const textRegions = (rule.regions ?? []).filter(r => r.type === 'text');
     if (!textRegions.length) return null;
 
-    // Name attribute used for joining (first non-virtual attr linked to 'name')
-    const nameAttr = (rule.attributes ?? []).find(a => a.foundryField === 'name' && !a.isVirtual);
-
-    // Merge entries and metadata from all text regions
+    const textFields    = rule.textFields?.length ? rule.textFields : null;
+    const nameAttr      = (rule.attributes ?? []).find(a => a.foundryField === 'name' && !a.isVirtual);
     const allEntries    = [];
-    const allFieldKeys  = new Set();
     const allLinkedAttrs = [];
     const regionMeta    = [];
 
     for (const region of textRegions) {
       const entries = this._textScanData[region.id] ?? [];
-      for (const e of entries) {
-        for (const k of Object.keys(e)) {
-          if (!k.startsWith('_')) allFieldKeys.add(k);
-        }
-      }
       allEntries.push(...entries);
-
-      const linkedAttrs = (rule.attributes ?? []).filter(
-        a => a.isVirtual && a.textRegionId === region.id
-      );
+      const linkedAttrs = (rule.attributes ?? []).filter(a => a.isVirtual && a.textRegionId === region.id);
       allLinkedAttrs.push(...linkedAttrs);
       regionMeta.push({ id: region.id, label: region.label, standalone: region.standalone ?? false, linkedAttrs });
     }
 
-    const fieldKeys = [...allFieldKeys];
+    // Build column definitions
+    let columns;
+    if (textFields) {
+      columns = textFields.map(f => ({
+        id:           f.id,
+        header:       f.header || (f.isJoinTarget ? 'Name' : 'Data'),
+        isJoinTarget: !!f.isJoinTarget,
+        foundryAttr:  f.foundryAttr ?? ''
+      }));
+    } else {
+      // Legacy path: fixed Name + Description columns plus any labeled keys
+      const extraKeys = new Set();
+      for (const e of allEntries) {
+        for (const k of Object.keys(e)) { if (!k.startsWith('_')) extraKeys.add(k); }
+      }
+      columns = [
+        { id: '_textName',        header: 'Name',        isJoinTarget: true,  foundryAttr: '' },
+        ...[...extraKeys].map(k => ({ id: k, header: k, isJoinTarget: false, foundryAttr: '' })),
+        { id: '_textDescription', header: 'Description',  isJoinTarget: false, foundryAttr: '' }
+      ];
+    }
+
+    // Determine whether we have a table to match against
+    const hasTables = (this._scanData?.tables?.length ?? 0) > 0;
+    const joinField = textFields?.find(f => f.isJoinTarget);
 
     const enrichedEntries = allEntries.map(entry => {
       let matchStatus = 'unlinked';
-      if (allLinkedAttrs.length && nameAttr) {
-        const normEntry = normalizeItemName(entry._textName);
+      const canMatch = hasTables && (joinField || (allLinkedAttrs.length && nameAttr));
+      if (canMatch) {
+        const normEntry = normalizeItemName(entry._textName ?? '');
         let found = false;
         for (const table of (this._scanData?.tables ?? [])) {
           for (const row of table.rows) {
             if (row._injected || row._sectionHeader) continue;
-            const nameCell = row.cells.find(c => c.column === nameAttr.columnHeader);
+            const nameCell = nameAttr
+              ? row.cells.find(c => c.column === nameAttr.columnHeader)
+              : row.cells[0];
             if (!nameCell) continue;
             const normRow = normalizeItemName(nameCell.value);
             if (normRow === normEntry || normRow.includes(normEntry) || normEntry.includes(normRow)) {
-              found = true;
-              break;
+              found = true; break;
             }
           }
           if (found) break;
         }
         matchStatus = found ? 'matched' : 'unmatched';
       }
-      const _fields = fieldKeys.map(k => ({ key: k, value: entry[k] ?? '' }));
-      return { ...entry, _matchStatus: matchStatus, _fields };
+      const _cols = columns.map(c => ({ id: c.id, header: c.header, isJoinTarget: c.isJoinTarget, value: entry[c.id] ?? '' }));
+      return { ...entry, _matchStatus: matchStatus, _cols };
     });
 
     return {
       regions:        regionMeta,
+      columns,
       entries:        enrichedEntries,
-      fieldKeys,
       linkedAttrs:    allLinkedAttrs,
       hasEntries:     enrichedEntries.length > 0,
       unmatchedCount: enrichedEntries.filter(e => e._matchStatus === 'unmatched').length
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Text column header menu
+  // -------------------------------------------------------------------------
+
+  #showTextColumnMenu(event, th) {
+    event.stopPropagation();
+    const fieldId = th.dataset.fieldId;
+    if (!fieldId) return;
+    const rule = this.selectedRule;
+    if (!rule) return;
+    const tf = (rule.textFields ?? []).find(f => f.id === fieldId);
+    if (!tf) return;
+
+    const menuItems = [];
+
+    // Join Target toggle
+    if (tf.isJoinTarget) {
+      menuItems.push({
+        icon: 'fa-unlink',
+        label: 'Remove Join Target',
+        action: () => { tf.isJoinTarget = false; this.#schedulePreview(); this.render(); }
+      });
+    } else {
+      menuItems.push({
+        icon: 'fa-link',
+        label: 'Set as Join Target',
+        action: () => {
+          for (const f of (rule.textFields ?? [])) f.isJoinTarget = false;
+          tf.isJoinTarget = true;
+          this.#schedulePreview();
+          this.render();
+        }
+      });
+    }
+
+    // Link Attribute
+    if (this._cachedAttributePaths?.length) {
+      menuItems.push({ separator: true });
+      menuItems.push({ heading: `Map "${tf.header || 'field'}" to attribute:` });
+      menuItems.push({ filterInput: true });
+      for (const attr of this._cachedAttributePaths) {
+        menuItems.push({
+          icon: 'fa-database', label: attr.path, filterable: true,
+          action: () => { tf.foundryAttr = attr.path; this.#schedulePreview(); this.render(); }
+        });
+      }
+      if (tf.foundryAttr) {
+        menuItems.push({ separator: true });
+        menuItems.push({
+          icon: 'fa-times',
+          label: 'Clear attribute mapping',
+          action: () => { tf.foundryAttr = ''; this.render(); }
+        });
+      }
+    }
+
+    this.#showContextMenu(event, menuItems);
   }
 
   // -------------------------------------------------------------------------
@@ -1280,6 +1393,87 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     const id = target.closest('[data-text-rule-id]')?.dataset.textRuleId;
     rule.textRules = (rule.textRules ?? []).filter(r => r.id !== id);
     this.#schedulePreview();
+    this.render();
+  }
+
+  // -------------------------------------------------------------------------
+  // Field rules actions
+  // -------------------------------------------------------------------------
+
+  static #addTextField() {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    rule.textFields ??= [];
+    rule.textFields.push({
+      id:           foundry.utils.randomID(),
+      header:       '',
+      isJoinTarget: false,
+      foundryAttr:  '',
+      rules:        []
+    });
+    this.render();
+  }
+
+  static #deleteTextField(event, target) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    const id = target.closest('[data-field-id]')?.dataset.fieldId;
+    rule.textFields = (rule.textFields ?? []).filter(f => f.id !== id);
+    this.#schedulePreview();
+    this.render();
+  }
+
+  static #moveTextField(event, target) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    const id  = target.closest('[data-field-id]')?.dataset.fieldId;
+    const dir = target.dataset.dir;
+    const arr = rule.textFields ?? [];
+    const idx = arr.findIndex(f => f.id === id);
+    if (idx < 0) return;
+    const swap = dir === 'up' ? idx - 1 : idx + 1;
+    if (swap < 0 || swap >= arr.length) return;
+    [arr[idx], arr[swap]] = [arr[swap], arr[idx]];
+    this.render();
+  }
+
+  static #addTextFieldRule(event, target) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    const fieldId = target.closest('[data-field-id]')?.dataset.fieldId;
+    const tf = (rule.textFields ?? []).find(f => f.id === fieldId);
+    if (!tf) return;
+    tf.rules ??= [];
+    tf.rules.push({ id: foundry.utils.randomID(), type: target.dataset.ruleType ?? 'target', pattern: '' });
+    this.render();
+  }
+
+  static #deleteTextFieldRule(event, target) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    const fieldId = target.closest('[data-field-id]')?.dataset.fieldId;
+    const ruleId  = target.closest('[data-rule-id]')?.dataset.ruleId;
+    const tf = (rule.textFields ?? []).find(f => f.id === fieldId);
+    if (!tf) return;
+    tf.rules = (tf.rules ?? []).filter(r => r.id !== ruleId);
+    this.#schedulePreview();
+    this.render();
+  }
+
+  static #moveTextFieldRule(event, target) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    const fieldId = target.closest('[data-field-id]')?.dataset.fieldId;
+    const ruleId  = target.closest('[data-rule-id]')?.dataset.ruleId;
+    const dir     = target.dataset.dir;
+    const tf = (rule.textFields ?? []).find(f => f.id === fieldId);
+    if (!tf) return;
+    const arr = tf.rules ?? [];
+    const idx = arr.findIndex(r => r.id === ruleId);
+    if (idx < 0) return;
+    const swap = dir === 'up' ? idx - 1 : idx + 1;
+    if (swap < 0 || swap >= arr.length) return;
+    [arr[idx], arr[swap]] = [arr[swap], arr[idx]];
     this.render();
   }
 

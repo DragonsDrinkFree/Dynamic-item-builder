@@ -854,3 +854,115 @@ export function applyStripRules(entries, stripRules) {
     }
   }
 }
+
+/**
+ * Parse a block of PDF items using an ordered array of field definitions.
+ *
+ * Each field has:
+ *   - fieldType: 'link' (defines entry boundaries) | 'data' (captures text)
+ *   - rules: [{type:'target'|'strip', pattern}]
+ *
+ * The link field's target rules identify "start of new item" rows and split
+ * the text into per-item blocks. Data fields then claim rows within each block
+ * using their own target rules; a data field with no target rules is a catch-all
+ * that receives all unclaimed rows.
+ *
+ * @param {Object[]} items   PDF text items within the region
+ * @param {Object[]} fields  Ordered array of field definitions
+ * @returns {Object[]} Array of entry objects keyed by field.id, plus _textName
+ */
+export function parseTextFields(items, fields) {
+  if (!fields?.length || !items?.length) return [];
+
+  const rows = groupIntoRows(items)
+    .map(r => r.items.sort((a, b) => a.x - b.x).map(i => i.text).join(' ').trim())
+    .filter(Boolean);
+  if (!rows.length) return [];
+
+  // Boundary field: join-target field if present, else first field that has target rules
+  const boundaryField = fields.find(f => f.isJoinTarget) ?? fields.find(f =>
+    f.rules.some(r => r.type === 'target' && r.pattern?.trim())
+  ) ?? null;
+
+  // Compile boundary regex from boundary field target rules
+  const boundaryPatterns = (boundaryField?.rules ?? [])
+    .filter(r => r.type === 'target' && r.pattern?.trim())
+    .map(r => r.pattern.trim());
+  const boundaryRe = boundaryPatterns.length
+    ? safeRegexText(boundaryPatterns.join('|'), 'i')
+    : null;
+
+  // Split all rows into per-item blocks at boundary matches
+  let blocks;
+  if (boundaryRe) {
+    blocks = [];
+    let current = null;
+    for (const row of rows) {
+      if (boundaryRe.test(row)) {
+        if (current) blocks.push(current);
+        current = [row];
+      } else if (current) {
+        current.push(row);
+      }
+    }
+    if (current) blocks.push(current);
+    if (!blocks.length) return [];
+  } else {
+    blocks = [rows];
+  }
+
+  // Catch-all: non-boundary field with no target rules (gets all remaining text)
+  const catchAll = fields.find(f =>
+    f !== boundaryField &&
+    !f.rules.some(r => r.type === 'target' && r.pattern?.trim())
+  ) ?? null;
+
+  return blocks.map(block => _extractTextFieldValues(block, fields, boundaryField, boundaryRe, catchAll));
+}
+
+function _extractTextFieldValues(block, fields, boundaryField, boundaryRe, catchAll) {
+  const entry = {};
+  let remaining = [...block];
+
+  for (const field of fields) {
+    const targets = field.rules
+      .filter(r => r.type === 'target' && r.pattern?.trim())
+      .map(r => r.pattern.trim());
+
+    let rawValue;
+
+    if (field === boundaryField && boundaryRe) {
+      // Extract only the matched portion of the boundary row.
+      // The text after the match is prepended to remaining so subsequent fields can claim it.
+      const firstRow = block[0] ?? '';
+      const m = boundaryRe.exec(firstRow);
+      rawValue = m ? firstRow.slice(m.index, m.index + m[0].length) : firstRow;
+      const afterMatch = m ? firstRow.slice(m.index + m[0].length).trim() : '';
+      remaining = afterMatch ? [afterMatch, ...block.slice(1)] : block.slice(1);
+    } else if (field === catchAll) {
+      rawValue  = remaining.join(' ');
+      remaining = [];
+    } else if (targets.length) {
+      const re      = safeRegexText(targets.join('|'), 'i');
+      const claimed = remaining.filter(row => re?.test(row));
+      remaining     = remaining.filter(row => !re?.test(row));
+      rawValue      = claimed.join(' ');
+    } else {
+      rawValue = '';
+    }
+
+    // Apply strip rules
+    rawValue = _applyFieldStrips(rawValue, field.rules);
+    entry[field.id] = rawValue;
+    if (field === boundaryField) entry._textName = rawValue;
+  }
+
+  return entry;
+}
+
+function _applyFieldStrips(text, rules) {
+  for (const rule of rules.filter(r => r.type === 'strip' && r.pattern?.trim())) {
+    try { text = text.replace(new RegExp(rule.pattern, 'gi'), '').trim(); } catch { /* skip */ }
+  }
+  return text.trim();
+}

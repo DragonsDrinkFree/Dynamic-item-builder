@@ -3,7 +3,7 @@
  * an array of detected items: [{ name, [foundryField]: value, ... }]
  */
 
-import { extractPages, parsePageString, mergePageItems, groupIntoRows, detectColumns, mapRowsToCells, detectTables, applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits, parseDescriptionBlock, applyStripRules, normalizeItemName } from './pdf-parser.js';
+import { extractPages, parsePageString, mergePageItems, groupIntoRows, detectColumns, mapRowsToCells, detectTables, applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits, parseDescriptionBlock, parseTextFields, applyStripRules, normalizeItemName } from './pdf-parser.js';
 
 /**
  * Apply a rule to a loaded PDF document.
@@ -74,6 +74,8 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
   const regionTextMaps = new Map();
   const standaloneTextItems = [];
 
+  const textFields = rule.textFields?.length ? rule.textFields : null;
+
   for (const region of textRegions) {
     const page = pages.find(p => p.pageNum === region.page);
     if (!page) continue;
@@ -86,22 +88,26 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
     );
     if (!regionItems.length) continue;
 
-    const textRules   = rule.textRules ?? [];
-    const namePattern = textRules
-      .filter(r => r.type === 'target' && r.pattern?.trim())
-      .map(r => r.pattern.trim())
-      .join('|') || undefined;
-    const stripRules  = textRules.filter(r => r.type === 'strip' && r.pattern?.trim());
-
-    const entries = parseDescriptionBlock(regionItems, { namePattern, useFont: true });
-    applyStripRules(entries, stripRules);
+    let entries;
+    if (textFields) {
+      entries = parseTextFields(regionItems, textFields);
+    } else {
+      const textRules   = rule.textRules ?? [];
+      const namePattern = textRules
+        .filter(r => r.type === 'target' && r.pattern?.trim())
+        .map(r => r.pattern.trim())
+        .join('|') || undefined;
+      const stripRules  = textRules.filter(r => r.type === 'strip' && r.pattern?.trim());
+      entries = parseDescriptionBlock(regionItems, { namePattern, useFont: true });
+      applyStripRules(entries, stripRules);
+    }
 
     if (region.standalone) {
       standaloneTextItems.push(...entries);
     } else {
       const nameMap = new Map();
       for (const entry of entries) {
-        nameMap.set(normalizeItemName(entry._textName), entry);
+        nameMap.set(normalizeItemName(entry._textName ?? ''), entry);
       }
       regionTextMaps.set(region.id, nameMap);
     }
@@ -135,25 +141,34 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
       const item = extractAttributes(cells, regularAttrs, rule);
       if (!item) continue;
 
-      // Inject virtual column values from matched text region entries
-      if (virtualAttrs.length) {
-        // Determine this row's name for joining (use the attribute linked to 'name')
+      // Inject text region data into matched table rows
+      if (regionTextMaps.size > 0) {
         const nameAttr = regularAttrs.find(a => a.foundryField === 'name');
         const rowName  = nameAttr ? (cells[nameAttr.columnHeader] ?? '') : '';
         const normName = normalizeItemName(rowName);
 
-        for (const vAttr of virtualAttrs) {
-          const nameMap = regionTextMaps.get(vAttr.textRegionId);
-          if (!nameMap) continue;
-          const matched = findTextMatch(normName, nameMap);
-          if (!matched) continue;
-
-          // The virtual attribute's columnHeader maps to a field in the text entry.
-          // By convention: '_textDescription' or any detected labeled field name.
-          const textFieldKey = vAttr.columnHeader;
-          const rawValue = matched[textFieldKey] ?? '';
-          const value = applyTransform(String(rawValue).trim(), vAttr.transform);
-          if (value !== '') setNestedValue(item, vAttr.foundryField, value);
+        if (textFields) {
+          // New path: inject each data field's value via its foundryAttr
+          for (const [, nameMap] of regionTextMaps) {
+            const matched = findTextMatch(normName, nameMap);
+            if (!matched) continue;
+            for (const field of textFields) {
+              if (!field.foundryAttr) continue;
+              const rawValue = String(matched[field.id] ?? '').trim();
+              if (rawValue !== '') setNestedValue(item, field.foundryAttr, rawValue);
+            }
+          }
+        } else if (virtualAttrs.length) {
+          // Old path: virtual attribute column mapping
+          for (const vAttr of virtualAttrs) {
+            const nameMap = regionTextMaps.get(vAttr.textRegionId);
+            if (!nameMap) continue;
+            const matched = findTextMatch(normName, nameMap);
+            if (!matched) continue;
+            const rawValue = matched[vAttr.columnHeader] ?? '';
+            const value = applyTransform(String(rawValue).trim(), vAttr.transform);
+            if (value !== '') setNestedValue(item, vAttr.foundryField, value);
+          }
         }
       }
 
@@ -161,24 +176,54 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
     }
   }
 
-  // Standalone text-only items — only use virtual attrs for standalone regions
-  const standaloneRegionIds = new Set(textRegions.filter(r => r.standalone).map(r => r.id));
+  // Text-region-as-items path: when no table produced results, use text entries directly.
+  // Each entry in regionTextMaps becomes its own item via foundryAttr mappings.
+  if (results.length === 0 && regionTextMaps.size > 0 && textFields?.length) {
+    for (const [, nameMap] of regionTextMaps) {
+      for (const [, entry] of nameMap) {
+        const item = {};
+        let hasData = false;
+        for (const field of textFields) {
+          if (!field.foundryAttr) continue;
+          const rawValue = String(entry[field.id] ?? '').trim();
+          if (rawValue !== '') { hasData = true; setNestedValue(item, field.foundryAttr, rawValue); }
+        }
+        if (hasData) {
+          const rowText = Object.values(entry).join(' ');
+          if (skipRe?.test(rowText)) continue;
+          results.push(item);
+        }
+      }
+    }
+  }
+
+  // Standalone text-only items
   if (standaloneTextItems.length) {
-    const textOnlyAttrs = (rule.attributes ?? []).filter(
-      a => a.isVirtual && standaloneRegionIds.has(a.textRegionId)
-    );
     for (const entry of standaloneTextItems) {
       const item = {};
       let hasData = false;
-      for (const attr of textOnlyAttrs) {
-        if (!attr.foundryField) continue;
-        const rawValue = entry[attr.columnHeader] ?? '';
-        const value = applyTransform(String(rawValue).trim(), attr.transform);
-        if (value !== '') {
-          hasData = true;
-          setNestedValue(item, attr.foundryField, value);
+
+      if (textFields) {
+        // New path: each field's value → foundryAttr
+        for (const field of textFields) {
+          if (!field.foundryAttr) continue;
+          const rawValue = String(entry[field.id] ?? '').trim();
+          if (rawValue !== '') { hasData = true; setNestedValue(item, field.foundryAttr, rawValue); }
+        }
+      } else {
+        // Old path: virtual attrs
+        const standaloneRegionIds = new Set(textRegions.filter(r => r.standalone).map(r => r.id));
+        const textOnlyAttrs = (rule.attributes ?? []).filter(
+          a => a.isVirtual && standaloneRegionIds.has(a.textRegionId)
+        );
+        for (const attr of textOnlyAttrs) {
+          if (!attr.foundryField) continue;
+          const rawValue = entry[attr.columnHeader] ?? '';
+          const value = applyTransform(String(rawValue).trim(), attr.transform);
+          if (value !== '') { hasData = true; setNestedValue(item, attr.foundryField, value); }
         }
       }
+
       if (hasData) results.push(item);
     }
   }

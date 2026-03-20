@@ -1743,6 +1743,88 @@ div.ignore-tr {
   font-family: monospace;
 }
 
+/* ── Field Rules ── */
+.dib-field-rules-section {
+  border: 1px solid rgba(107, 95, 160, 0.4);
+  border-radius: 4px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.dib-field-rules-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: rgba(107, 95, 160, 0.15);
+}
+.dib-field-rules-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: #c0b5f0;
+  margin-right: auto;
+}
+.dib-text-field-block {
+  border-top: 1px solid rgba(107, 95, 160, 0.25);
+}
+.dib-text-field-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  background: rgba(0,0,0,0.15);
+}
+.dib-field-join-target > .dib-text-field-header { border-left: 3px solid #80d080; }
+.dib-text-field-header-input {
+  flex: 1;
+  font-weight: 600;
+  font-size: 12px;
+  padding: 2px 5px;
+  background: var(--dib-input-bg, rgba(0,0,0,0.3));
+  border: 1px solid rgba(107, 95, 160, 0.3);
+  border-radius: 3px;
+  color: inherit;
+  min-width: 0;
+}
+.dib-text-field-attr-badge {
+  font-size: 10px;
+  font-family: monospace;
+  color: #7ab0d4;
+  white-space: nowrap;
+  flex-shrink: 0;
+  opacity: 0.8;
+}
+.dib-text-field-rule-adder {
+  display: flex;
+  gap: 4px;
+  padding: 3px 8px 5px;
+}
+.dib-field-catchall-note {
+  margin: 0;
+  padding: 3px 8px;
+}
+.dib-col-attr-badge {
+  display: block;
+  font-size: 9px;
+  font-family: monospace;
+  font-weight: normal;
+  opacity: 0.6;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dib-text-preview-th {
+  cursor: pointer;
+  user-select: none;
+}
+.dib-text-preview-th:hover { background: rgba(107, 95, 160, 0.2); }
+.dib-text-col-join { font-weight: 600; }
+.dib-join-icon {
+  font-size: 9px;
+  margin-left: 3px;
+  color: #80d080;
+  vertical-align: middle;
+}
+
 /* ── Text Name Rules ── */
 .dib-text-rules-section {
   border: 1px solid rgba(107, 95, 160, 0.4);

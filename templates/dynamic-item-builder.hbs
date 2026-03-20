@@ -471,41 +471,82 @@
       <div class="dib-tab-panel {{#if textTabActive}}active{{/if}}" id="dib-tab-text">
         <div class="dib-text-preview">
 
-          {{!-- Name rules toolbar --}}
-          <div class="dib-text-rules-section">
-            <div class="dib-text-rules-header">
+          {{!-- Field Rules --}}
+          <div class="dib-field-rules-section">
+            <div class="dib-field-rules-header">
               <button class="dib-btn dib-btn-sm" data-action="refreshPreview"
-                      title="Apply rules and refresh text preview">
+                      title="Apply field rules and refresh text preview">
                 <i class="fas fa-sync-alt"></i> Refresh
               </button>
-              <span class="dib-text-rules-title"><i class="fas fa-filter"></i> Name Rules</span>
-              <button class="dib-btn dib-btn-sm" data-action="addTextRule" data-rule-type="target"
-                      title="Add a regex that identifies name lines in the text region">
-                <i class="fas fa-plus"></i> Target
-              </button>
-              <button class="dib-btn dib-btn-sm" data-action="addTextRule" data-rule-type="strip"
-                      title="Add a pattern to strip from matched names">
-                <i class="fas fa-plus"></i> Strip
+              <span class="dib-field-rules-title"><i class="fas fa-layer-group"></i> Field Rules</span>
+              <button class="dib-btn dib-btn-sm" data-action="addTextField"
+                      title="Add a new field to extract from this text region">
+                <i class="fas fa-plus"></i> Add Field
               </button>
             </div>
-            {{#each selectedRule.textRules}}
-            <div class="dib-text-rule-row" data-text-rule-id="{{this.id}}">
-              <span class="dib-text-rule-badge dib-text-rule-{{this.type}}">{{this.type}}</span>
-              <input type="text"
-                     class="dib-text-rule-input"
-                     value="{{this.pattern}}"
-                     data-text-rule-id="{{this.id}}"
-                     placeholder="{{#if (eq this.type 'target')}}Regex to match name lines…{{else}}Pattern to strip from name…{{/if}}">
-              <button class="dib-btn dib-btn-icon dib-btn-danger"
-                      data-action="deleteTextRule"
-                      data-text-rule-id="{{this.id}}"
-                      title="Remove rule">
-                <i class="fas fa-times"></i>
-              </button>
+
+
+            {{#each selectedRule.textFields}}
+            <div class="dib-text-field-block{{#if this.isJoinTarget}} dib-field-join-target{{/if}}" data-field-id="{{this.id}}">
+              <div class="dib-text-field-header">
+                <input type="text" class="dib-text-field-header-input"
+                       data-field-id="{{this.id}}" data-field-prop="header"
+                       value="{{this.header}}" placeholder="Field label…">
+                {{#if this.foundryAttr}}<span class="dib-text-field-attr-badge" title="Mapped to: {{this.foundryAttr}}">→ {{this.foundryAttr}}</span>{{/if}}
+                <button class="dib-btn dib-btn-icon" data-action="moveTextField"
+                        data-dir="up" title="Move field up">
+                  <i class="fas fa-chevron-up"></i>
+                </button>
+                <button class="dib-btn dib-btn-icon" data-action="moveTextField"
+                        data-dir="down" title="Move field down">
+                  <i class="fas fa-chevron-down"></i>
+                </button>
+                <button class="dib-btn dib-btn-icon dib-btn-danger" data-action="deleteTextField"
+                        title="Remove field">
+                  <i class="fas fa-times"></i>
+                </button>
+              </div>
+              {{#each this.rules}}
+              <div class="dib-text-rule-row" data-rule-id="{{this.id}}">
+                <span class="dib-text-rule-badge dib-text-rule-{{this.type}}">{{this.type}}</span>
+                <input type="text" class="dib-text-rule-input"
+                       value="{{this.pattern}}"
+                       data-field-id="{{../id}}" data-rule-id="{{this.id}}"
+                       placeholder="{{#if (eq this.type 'target')}}Regex to identify rows…{{else}}Pattern to strip from result…{{/if}}">
+                <button class="dib-btn dib-btn-icon" data-action="moveTextFieldRule"
+                        data-dir="up" title="Move rule up">
+                  <i class="fas fa-chevron-up"></i>
+                </button>
+                <button class="dib-btn dib-btn-icon" data-action="moveTextFieldRule"
+                        data-dir="down" title="Move rule down">
+                  <i class="fas fa-chevron-down"></i>
+                </button>
+                <button class="dib-btn dib-btn-icon dib-btn-danger" data-action="deleteTextFieldRule"
+                        title="Remove rule">
+                  <i class="fas fa-times"></i>
+                </button>
+              </div>
+              {{/each}}
+              {{#unless this.isJoinTarget}}
+              {{#unless this.rules.length}}
+              <p class="dib-text-rules-empty dib-field-catchall-note">No target rules — catch-all (receives all unclaimed text).</p>
+              {{/unless}}
+              {{/unless}}
+              <div class="dib-text-field-rule-adder">
+                <button class="dib-btn dib-btn-sm" data-action="addTextFieldRule"
+                        data-rule-type="target" title="Add a regex to identify which rows belong to this field">
+                  <i class="fas fa-plus"></i> Target
+                </button>
+                <button class="dib-btn dib-btn-sm" data-action="addTextFieldRule"
+                        data-rule-type="strip" title="Add a pattern to strip from this field's captured text">
+                  <i class="fas fa-plus"></i> Strip
+                </button>
+              </div>
             </div>
             {{/each}}
-            {{#unless selectedRule.textRules.length}}
-            <p class="dib-text-rules-empty">No rules — names detected by font size.</p>
+
+            {{#unless selectedRule.textFields.length}}
+            <p class="dib-text-rules-empty">No fields — click Add Field to start parsing text regions.</p>
             {{/unless}}
           </div>
 
@@ -565,12 +606,15 @@
               <table class="dib-text-entries-table">
                 <thead>
                   <tr>
-                    <th class="dib-text-entry-name-col">Name</th>
-                    {{#each textScanContext.fieldKeys}}
-                    <th>{{this}}</th>
+                    {{#each textScanContext.columns}}
+                    <th class="dib-text-preview-th{{#if this.isJoinTarget}} dib-text-col-join{{/if}}"
+                        data-field-id="{{this.id}}" title="Click to configure">
+                      {{this.header}}{{#unless this.header}}(unnamed){{/unless}}
+                      {{#if this.isJoinTarget}}<i class="fas fa-link dib-join-icon" title="Join Target"></i>{{/if}}
+                      {{#if this.foundryAttr}}<span class="dib-col-attr-badge">→ {{this.foundryAttr}}</span>{{/if}}
+                    </th>
                     {{/each}}
-                    <th class="dib-text-entry-desc-col">Description</th>
-                    {{#if textScanContext.linkedAttrs.length}}
+                    {{#if textScanContext.unmatchedCount}}
                     <th class="dib-text-entry-match-col">Match</th>
                     {{/if}}
                   </tr>
@@ -578,14 +622,12 @@
                 <tbody>
                   {{#each textScanContext.entries}}
                   <tr class="dib-text-entry-row dib-text-match-{{this._matchStatus}}">
-                    <td class="dib-text-entry-name">{{this._textName}}</td>
-                    {{#each this._fields}}
-                    <td>{{this.value}}</td>
-                    {{/each}}
-                    <td class="dib-text-entry-desc" title="{{this._textDescription}}">
-                      {{truncate this._textDescription 80}}
+                    {{#each this._cols}}
+                    <td class="dib-text-entry-td{{#if this.isJoinTarget}} dib-text-col-join{{/if}}" title="{{this.value}}">
+                      {{truncate this.value 80}}
                     </td>
-                    {{#if @root.textScanContext.linkedAttrs.length}}
+                    {{/each}}
+                    {{#if @root.textScanContext.unmatchedCount}}
                     <td class="dib-text-match-cell">
                       {{#if (eq this._matchStatus "matched")}}
                       <i class="fas fa-check dib-match-ok" title="Matched to table row"></i>
