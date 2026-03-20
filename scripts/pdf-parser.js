@@ -831,117 +831,26 @@ export function parseDescriptionBlock(items, config = {}) {
   return entries;
 }
 
-/**
- * Parse a block of items that represents a single structured entry
- * (e.g. one spell, one ability). The name is identified by the largest
- * fontSize cluster at the top of the block. `Label: value` pairs (which may
- * appear in two columns side-by-side) become individual named fields.
- * Everything else becomes `_textDescription`.
- *
- * Returns a single object: { _textName, [fieldName]: value, ..., _textDescription }
- *
- * @param {Object[]} items  PDF text items within the region
- */
-export function parseStructuredEntry(items) {
-  if (!items.length) return null;
-
-  const rows = groupIntoRows(items);
-  if (!rows.length) return null;
-
-  const allSizes = items.map(i => i.fontSize).filter(Boolean).sort((a, b) => b - a);
-  const maxSize = allSizes[0] ?? 0;
-  // Name: items in the topmost row(s) that share the max (or near-max) fontSize
-  const nameItems = [];
-  for (const row of rows) {
-    const headings = row.items.filter(i => (i.fontSize ?? 0) >= maxSize - 1);
-    if (headings.length > 0) {
-      nameItems.push(...headings);
-      // Only use name rows at the very top — stop when we hit a row that has
-      // no heading-size items (the content block begins)
-    } else {
-      break;
-    }
-  }
-
-  const _textName = nameItems
-    .sort((a, b) => a.x - b.x)
-    .map(i => i.text)
-    .join(' ')
-    .replace(/:$/, '')
-    .trim();
-
-  // Remaining items (below the name rows)
-  const nameYMax = nameItems.length ? Math.max(...nameItems.map(i => i.y)) : -Infinity;
-  const bodyRows = rows.filter(r => r.y > nameYMax + 0.5);
-
-  const entry = { _textName, _textDescription: '' };
-
-  // Label-field regex: "SomeLabel: value text here"
-  const labelRe = /^([A-Z][A-Za-z][A-Za-z\s]{0,28}):\s+(.+)/;
-
-  for (const row of bodyRows) {
-    const sortedItems = [...row.items].sort((a, b) => a.x - b.x);
-    const rowText = sortedItems.map(i => i.text).join(' ').trim();
-    if (!rowText) continue;
-
-    // For multi-column labeled fields, detect an X gap within the row.
-    // If a significant gap exists, treat each column half independently.
-    const xPositions = sortedItems.map(i => i.x);
-    const rowWidth = Math.max(...sortedItems.map(i => i.x + (i.width ?? 0))) - Math.min(...xPositions);
-    let splitX = null;
-
-    if (sortedItems.length >= 4 && rowWidth > 60) {
-      // Find the largest internal gap
-      let maxGap = 0;
-      let maxGapIdx = -1;
-      for (let i = 1; i < sortedItems.length; i++) {
-        const prevEnd = sortedItems[i - 1].x + (sortedItems[i - 1].width ?? 0);
-        const gap = sortedItems[i].x - prevEnd;
-        if (gap > maxGap && gap > 20) {
-          maxGap = gap;
-          maxGapIdx = i;
-        }
-      }
-      if (maxGapIdx !== -1) {
-        splitX = (sortedItems[maxGapIdx - 1].x + (sortedItems[maxGapIdx - 1].width ?? 0) +
-                  sortedItems[maxGapIdx].x) / 2;
-      }
-    }
-
-    const halves = splitX !== null
-      ? [
-          sortedItems.filter(i => i.x < splitX),
-          sortedItems.filter(i => i.x >= splitX)
-        ]
-      : [sortedItems];
-
-    let anyFieldFound = false;
-    for (const half of halves) {
-      const text = half.map(i => i.text).join(' ').trim();
-      if (!text) continue;
-      const m = labelRe.exec(text);
-      if (m) {
-        const key = m[1].trim();
-        const val = m[2].trim();
-        if (key !== '_textName' && key !== '_textDescription') {
-          entry[key] = entry[key] ? entry[key] + ' ' + val : val;
-          anyFieldFound = true;
-        }
-      }
-    }
-
-    if (!anyFieldFound) {
-      entry._textDescription = entry._textDescription
-        ? entry._textDescription + ' ' + rowText
-        : rowText;
-    }
-  }
-
-  entry._textDescription = entry._textDescription.trim();
-  return entry;
-}
 
 // Regex helper local to text parsing (avoids coupling with rule-engine.js)
 function safeRegexText(pattern, flags = '') {
   try { return new RegExp(pattern, flags); } catch { return null; }
+}
+
+/**
+ * Apply strip rules to an array of parsed text entries in-place.
+ * Each strip rule removes all matches of its pattern (case-insensitive) from _textName.
+ * @param {Object[]} entries
+ * @param {{pattern: string}[]} stripRules
+ */
+export function applyStripRules(entries, stripRules) {
+  if (!stripRules?.length) return;
+  for (const entry of entries) {
+    for (const rule of stripRules) {
+      try {
+        const re = new RegExp(rule.pattern, 'gi');
+        entry._textName = entry._textName.replace(re, '').trim();
+      } catch { /* invalid regex — skip */ }
+    }
+  }
 }

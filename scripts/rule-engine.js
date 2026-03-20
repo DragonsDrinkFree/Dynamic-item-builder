@@ -3,7 +3,7 @@
  * an array of detected items: [{ name, [foundryField]: value, ... }]
  */
 
-import { extractPages, parsePageString, mergePageItems, groupIntoRows, detectColumns, mapRowsToCells, detectTables, applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits, parseDescriptionBlock, parseStructuredEntry, normalizeItemName } from './pdf-parser.js';
+import { extractPages, parsePageString, mergePageItems, groupIntoRows, detectColumns, mapRowsToCells, detectTables, applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits, parseDescriptionBlock, applyStripRules, normalizeItemName } from './pdf-parser.js';
 
 /**
  * Apply a rule to a loaded PDF document.
@@ -38,43 +38,30 @@ export async function applyRule(rule, pdfDoc) {
  *   - used to create standalone items when region.standalone === true.
  */
 function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
-  // Group regions by their `group` key, in page→Y order
-  const groups = new Map();
-  for (const region of [...regions].sort((a, b) => a.page - b.page || a.y - b.y)) {
-    if (!groups.has(region.group)) groups.set(region.group, []);
-    groups.get(region.group).push(region);
-  }
+  // All table regions are one logical pool — sort page→Y, apply y-offsets,
+  // then run detectTables once. Must mirror DynamicItemBuilderApp.#scanTableRegions.
+  const sorted = [...regions].sort((a, b) => a.page - b.page || a.y - b.y);
+  let yOffset  = 0;
+  const allItems = [];
 
-  // Collect all tables across groups then re-index — mirrors
-  // DynamicItemBuilderApp.#scanTableRegions so table IDs stay consistent
-  // between the Table Preview and the extraction path.
-  const allTables = [];
-  for (const [, groupRegions] of groups) {
-    let yOffset    = 0;
-    const groupItems = [];
-
-    for (const region of groupRegions) {
-      const page = pages.find(p => p.pageNum === region.page);
-      if (!page) continue;
-      const regionItems = page.items.filter(item =>
-        item.x >= region.x            &&
-        item.x <= region.x + region.w &&
-        item.y >= region.y            &&
-        item.y <= region.y + region.h
-      );
-      for (const item of regionItems) {
-        groupItems.push({ ...item, y: item.y + yOffset });
-      }
-      if (regionItems.length) {
-        yOffset += Math.max(...regionItems.map(i => i.y)) + 50;
-      }
+  for (const region of sorted) {
+    const page = pages.find(p => p.pageNum === region.page);
+    if (!page) continue;
+    const regionItems = page.items.filter(item =>
+      item.x >= region.x            &&
+      item.x <= region.x + region.w &&
+      item.y >= region.y            &&
+      item.y <= region.y + region.h
+    );
+    for (const item of regionItems) {
+      allItems.push({ ...item, y: item.y + yOffset });
     }
-
-    if (!groupItems.length) continue;
-    allTables.push(...detectTables(groupItems).tables);
+    if (regionItems.length) {
+      yOffset += Math.max(...regionItems.map(i => i.y)) + 50;
+    }
   }
 
-  // Re-index (must match DynamicItemBuilderApp.#scanTableRegions)
+  const allTables = allItems.length ? detectTables(allItems).tables : [];
   allTables.forEach((t, i) => { t.id = `tbl-${i}`; });
 
   // Apply the same transforms as the Table Preview so attribute mappings align
@@ -99,12 +86,15 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
     );
     if (!regionItems.length) continue;
 
-    const entries = region.entryType === 'structured'
-      ? (parseStructuredEntry(regionItems) ? [parseStructuredEntry(regionItems)] : [])
-      : parseDescriptionBlock(regionItems, {
-          namePattern: region.namePattern,
-          useFont:     region.useFont ?? true
-        });
+    const textRules   = rule.textRules ?? [];
+    const namePattern = textRules
+      .filter(r => r.type === 'target' && r.pattern?.trim())
+      .map(r => r.pattern.trim())
+      .join('|') || undefined;
+    const stripRules  = textRules.filter(r => r.type === 'strip' && r.pattern?.trim());
+
+    const entries = parseDescriptionBlock(regionItems, { namePattern, useFont: true });
+    applyStripRules(entries, stripRules);
 
     if (region.standalone) {
       standaloneTextItems.push(...entries);

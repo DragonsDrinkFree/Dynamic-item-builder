@@ -9,7 +9,7 @@
 import {
   loadPDF, extractPages, parsePageString, mergePageItems,
   detectTables, renderPageToCanvas, applyColumnMerges, applyColumnSplits,
-  parseDescriptionBlock, parseStructuredEntry, normalizeItemName
+  parseDescriptionBlock, applyStripRules, normalizeItemName
 } from '../pdf-parser.js';
 import { applyRule }   from '../rule-engine.js';
 import { buildItems }  from '../item-builder.js';
@@ -45,7 +45,9 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       openAttributeMenu:   DynamicItemBuilderApp.#openAttributeMenu,
       acceptSuggestion:    DynamicItemBuilderApp.#acceptSuggestion,
       linkAllSuggestions:  DynamicItemBuilderApp.#linkAllSuggestions,
-      testRun:             DynamicItemBuilderApp.#testRun
+      testRun:             DynamicItemBuilderApp.#testRun,
+      addTextRule:         DynamicItemBuilderApp.#addTextRule,
+      deleteTextRule:      DynamicItemBuilderApp.#deleteTextRule
     }
   };
 
@@ -397,6 +399,15 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       this.#updateRegionOverlay();
     });
 
+    // Text rule pattern inputs — update data only, no auto-refresh
+    el.querySelector('.dib-text-rules-section')?.addEventListener('input', e => {
+      const input = e.target.closest('.dib-text-rule-input');
+      if (!input) return;
+      const rule = this.selectedRule;
+      const tr = (rule?.textRules ?? []).find(r => r.id === input.dataset.textRuleId);
+      if (tr) tr.pattern = input.value;
+    });
+
     // Text Preview: "Link to table" and "Create from Text" buttons
     el.querySelector('.dib-text-preview')?.addEventListener('click', e => {
       const linkBtn       = e.target.closest('[data-action="linkTextToTable"]');
@@ -677,26 +688,18 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
     const typeLabel = this._drawMode === 'table' ? 'Table' : 'Text';
     const count     = rule.regions.filter(r => r.type === this._drawMode).length + 1;
-    const group     = `${this._drawMode}-${count}`;
 
     const newRegion = {
       id:    foundry.utils.randomID(),
       type:  this._drawMode,
-      group,
       page:  this._plannerPage,
       x: Math.round(rect.x), y: Math.round(rect.y),
       w: Math.round(rect.w), h: Math.round(rect.h),
       label: `${typeLabel} ${count}`
     };
 
-    // Text regions get extra configuration fields
     if (this._drawMode === 'text') {
-      Object.assign(newRegion, {
-        entryType:   'description',
-        namePattern: '',
-        useFont:     true,
-        standalone:  false
-      });
+      newRegion.standalone = false;
     }
 
     rule.regions.push(newRegion);
@@ -951,6 +954,14 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         this._scanData = detectTables(allItems);
       }
 
+      // Compute name rules from rule.textRules
+      const textRules  = rule.textRules ?? [];
+      const namePattern = textRules
+        .filter(r => r.type === 'target' && r.pattern?.trim())
+        .map(r => r.pattern.trim())
+        .join('|') || undefined;
+      const stripRules = textRules.filter(r => r.type === 'strip' && r.pattern?.trim());
+
       // Scan text regions
       this._textScanData = {};
       for (const region of textRegions) {
@@ -959,12 +970,8 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         const regionItems = this.#filterItemsToRegion(page, region);
         if (!regionItems.length) continue;
 
-        const entries = region.entryType === 'structured'
-          ? (parseStructuredEntry(regionItems) ? [parseStructuredEntry(regionItems)] : [])
-          : parseDescriptionBlock(regionItems, {
-              namePattern: region.namePattern,
-              useFont:     region.useFont ?? true
-            });
+        const entries = parseDescriptionBlock(regionItems, { namePattern, useFont: true });
+        applyStripRules(entries, stripRules);
         this._textScanData[region.id] = entries;
       }
     } catch (err) {
@@ -1040,40 +1047,27 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
    * the first region in the group are used as the canonical schema).
    */
   #scanTableRegions(pages, regions) {
-    // Group regions by their `group` key, in page→Y order
-    const groups = new Map();
-    for (const region of [...regions].sort((a, b) => a.page - b.page || a.y - b.y)) {
-      if (!groups.has(region.group)) groups.set(region.group, []);
-      groups.get(region.group).push(region);
-    }
+    // All table regions on a rule are one logical pool — sort page→Y, apply y-offsets
+    const sorted = [...regions].sort((a, b) => a.page - b.page || a.y - b.y);
+    let yOffset  = 0;
+    const allItems = [];
 
-    const tables    = [];
-    const proseRows = [];
-
-    for (const [, groupRegions] of groups) {
-      let yOffset    = 0;
-      const groupItems = [];
-
-      for (const region of groupRegions) {
-        const page = pages.find(p => p.pageNum === region.page);
-        if (!page) continue;
-        const regionItems = this.#filterItemsToRegion(page, region);
-        for (const item of regionItems) {
-          groupItems.push({ ...item, y: item.y + yOffset });
-        }
-        if (regionItems.length) {
-          yOffset += Math.max(...regionItems.map(i => i.y)) + 50;
-        }
+    for (const region of sorted) {
+      const page = pages.find(p => p.pageNum === region.page);
+      if (!page) continue;
+      const regionItems = this.#filterItemsToRegion(page, region);
+      for (const item of regionItems) {
+        allItems.push({ ...item, y: item.y + yOffset });
       }
-
-      if (!groupItems.length) continue;
-      const result = detectTables(groupItems);
-      tables.push(...result.tables);
-      proseRows.push(...result.proseRows);
+      if (regionItems.length) {
+        yOffset += Math.max(...regionItems.map(i => i.y)) + 50;
+      }
     }
 
-    tables.forEach((t, i) => { t.id = `tbl-${i}`; });
-    return { tables, proseRows };
+    if (!allItems.length) return { tables: [], proseRows: [] };
+    const result = detectTables(allItems);
+    result.tables.forEach((t, i) => { t.id = `tbl-${i}`; });
+    return result;
   }
 
   /**
@@ -1082,66 +1076,69 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
    * with match status (matched/unmatched/unlinked) relative to the table scan.
    */
   #buildTextScanContext(rule) {
-    if (!rule) return [];
+    if (!rule) return null;
     const textRegions = (rule.regions ?? []).filter(r => r.type === 'text');
-    if (!textRegions.length) return [];
+    if (!textRegions.length) return null;
 
     // Name attribute used for joining (first non-virtual attr linked to 'name')
     const nameAttr = (rule.attributes ?? []).find(a => a.foundryField === 'name' && !a.isVirtual);
 
-    return textRegions.map(region => {
-      const entries = this._textScanData[region.id] ?? null;
+    // Merge entries and metadata from all text regions
+    const allEntries    = [];
+    const allFieldKeys  = new Set();
+    const allLinkedAttrs = [];
+    const regionMeta    = [];
 
-      // Collect all detected field keys across entries (for dynamic column headers)
-      const fieldKeys = entries
-        ? [...new Set(entries.flatMap(e => Object.keys(e).filter(k => !k.startsWith('_'))))]
-        : [];
+    for (const region of textRegions) {
+      const entries = this._textScanData[region.id] ?? [];
+      for (const e of entries) {
+        for (const k of Object.keys(e)) {
+          if (!k.startsWith('_')) allFieldKeys.add(k);
+        }
+      }
+      allEntries.push(...entries);
 
-      // Virtual attributes that draw from this region
       const linkedAttrs = (rule.attributes ?? []).filter(
         a => a.isVirtual && a.textRegionId === region.id
       );
+      allLinkedAttrs.push(...linkedAttrs);
+      regionMeta.push({ id: region.id, label: region.label, standalone: region.standalone ?? false, linkedAttrs });
+    }
 
-      // Enrich each entry with match status and pre-built field array for the template
-      const enrichedEntries = (entries ?? []).map(entry => {
-        let matchStatus = 'unlinked';
-        if (!region.standalone && linkedAttrs.length && nameAttr) {
-          const normEntry = normalizeItemName(entry._textName);
-          let found = false;
-          for (const table of (this._scanData?.tables ?? [])) {
-            for (const row of table.rows) {
-              if (row._injected || row._sectionHeader) continue;
-              const nameCell = row.cells.find(c => c.column === nameAttr.columnHeader);
-              if (!nameCell) continue;
-              const normRow = normalizeItemName(nameCell.value);
-              if (normRow === normEntry || normRow.includes(normEntry) || normEntry.includes(normRow)) {
-                found = true;
-                break;
-              }
+    const fieldKeys = [...allFieldKeys];
+
+    const enrichedEntries = allEntries.map(entry => {
+      let matchStatus = 'unlinked';
+      if (allLinkedAttrs.length && nameAttr) {
+        const normEntry = normalizeItemName(entry._textName);
+        let found = false;
+        for (const table of (this._scanData?.tables ?? [])) {
+          for (const row of table.rows) {
+            if (row._injected || row._sectionHeader) continue;
+            const nameCell = row.cells.find(c => c.column === nameAttr.columnHeader);
+            if (!nameCell) continue;
+            const normRow = normalizeItemName(nameCell.value);
+            if (normRow === normEntry || normRow.includes(normEntry) || normEntry.includes(normRow)) {
+              found = true;
+              break;
             }
-            if (found) break;
           }
-          matchStatus = found ? 'matched' : 'unmatched';
+          if (found) break;
         }
-        // Pre-build field pairs so the template doesn't need nested #each context tricks
-        const _fields = fieldKeys.map(k => ({ key: k, value: entry[k] ?? '' }));
-        return { ...entry, _matchStatus: matchStatus, _fields };
-      });
-
-      return {
-        id:          region.id,
-        label:       region.label,
-        entryType:   region.entryType   ?? 'description',
-        namePattern: region.namePattern ?? '',
-        useFont:     region.useFont     ?? true,
-        standalone:  region.standalone  ?? false,
-        entries:     enrichedEntries,
-        fieldKeys,
-        linkedAttrs,
-        hasEntries:  enrichedEntries.length > 0,
-        unmatchedCount: enrichedEntries.filter(e => e._matchStatus === 'unmatched').length
-      };
+        matchStatus = found ? 'matched' : 'unmatched';
+      }
+      const _fields = fieldKeys.map(k => ({ key: k, value: entry[k] ?? '' }));
+      return { ...entry, _matchStatus: matchStatus, _fields };
     });
+
+    return {
+      regions:        regionMeta,
+      entries:        enrichedEntries,
+      fieldKeys,
+      linkedAttrs:    allLinkedAttrs,
+      hasEntries:     enrichedEntries.length > 0,
+      unmatchedCount: enrichedEntries.filter(e => e._matchStatus === 'unmatched').length
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -1261,6 +1258,27 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     rule.attributes = (rule.attributes ?? []).filter(
       a => !(a.isVirtual && a.textRegionId === regionId && a.columnHeader === fieldKey)
     );
+    this.#schedulePreview();
+    this.render();
+  }
+
+  // -------------------------------------------------------------------------
+  // Text rules
+  // -------------------------------------------------------------------------
+
+  static #addTextRule(event, target) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    rule.textRules ??= [];
+    rule.textRules.push({ id: foundry.utils.randomID(), type: target.dataset.ruleType ?? 'target', pattern: '' });
+    this.render();
+  }
+
+  static #deleteTextRule(event, target) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    const id = target.closest('[data-text-rule-id]')?.dataset.textRuleId;
+    rule.textRules = (rule.textRules ?? []).filter(r => r.id !== id);
     this.#schedulePreview();
     this.render();
   }
