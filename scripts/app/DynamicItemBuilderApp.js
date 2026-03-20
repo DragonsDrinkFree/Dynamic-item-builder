@@ -9,7 +9,7 @@
 import {
   loadPDF, extractPages, parsePageString, mergePageItems,
   detectTables, renderPageToCanvas, applyColumnMerges, applyColumnSplits,
-  parseDescriptionBlock, parseTextFields, applyStripRules, normalizeItemName
+  parseDescriptionBlock, parseTextFields, extractRegionFonts, applyStripRules, normalizeItemName
 } from '../pdf-parser.js';
 import { applyRule }   from '../rule-engine.js';
 import { buildItems }  from '../item-builder.js';
@@ -92,6 +92,9 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
   /** @type {Object} region.id → parsed text entries array */
   _textScanData = {};
+
+  /** @type {Object} region.id → [{fontSize, fontName}] unique fonts in region */
+  _textRegionFonts = {};
 
   // ── Tab state ──────────────────────────────────────────────────────────────
 
@@ -261,6 +264,9 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     attributeList.sort((a, b) => ({ linked: 0, suggested: 1, none: 2 }[a.status] ?? 2) - ({ linked: 0, suggested: 1, none: 2 }[b.status] ?? 2));
     const suggestionCount = attributeList.filter(a => a.suggested).length;
 
+    const textScanContext = this.#buildTextScanContext(rule);
+    const textFontsJson   = JSON.stringify(textScanContext?.availableFonts ?? []);
+
     return {
       hasPdf:    !!this._pdf,
       pdfName:   this._pdfName,
@@ -291,7 +297,8 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       textRegionCount:  (rule?.regions ?? []).filter(r => r.type === 'text').length,
       hasTextRegions:   (rule?.regions ?? []).some(r => r.type === 'text'),
       // Text scan data for the Text Preview tab
-      textScanContext:  this.#buildTextScanContext(rule),
+      textScanContext,
+      textFontsJson,
       // Attribute mapping list
       attributeList,
       suggestionCount,
@@ -441,24 +448,48 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       }
     });
 
-    // Text Preview: "Link to table", "Create from Text" buttons, and column header clicks
+    // Field Rules: font-target select changes (font size filters font name dropdown)
+    el.querySelector('.dib-field-rules-section')?.addEventListener('change', e => {
+      const rule     = this.selectedRule;
+      if (!rule) return;
+      const fieldEl  = e.target.closest('[data-field-id]');
+      const ruleEl   = e.target.closest('[data-rule-id]');
+      if (!fieldEl || !ruleEl) return;
+      const tf = (rule.textFields ?? []).find(f => f.id === fieldEl.dataset.fieldId);
+      const tr = (tf?.rules ?? []).find(r => r.id === ruleEl.dataset.ruleId);
+      if (!tr || tr.type !== 'font-target') return;
+
+      if (e.target.classList.contains('dib-font-size-select')) {
+        tr.fontSize = e.target.value;
+        // Filter the adjacent font-name select options
+        const section   = e.target.closest('.dib-field-rules-section');
+        const allFonts  = JSON.parse(section?.dataset.fonts ?? '[]');
+        const nameSelect = ruleEl.querySelector('.dib-font-name-select');
+        if (nameSelect) {
+          const filtered = tr.fontSize === 'ALL'
+            ? [...new Set(allFonts.map(f => f.fontName))]
+            : [...new Set(allFonts.filter(f => String(f.fontSize) === tr.fontSize).map(f => f.fontName))];
+          // Reset to ALL if current selection is no longer valid
+          if (tr.fontName !== 'ALL' && !filtered.includes(tr.fontName)) tr.fontName = 'ALL';
+          nameSelect.innerHTML = '<option value="ALL">ALL</option>'
+            + filtered.map(n => `<option value="${n}"${n === tr.fontName ? ' selected' : ''}>${n}</option>`).join('');
+        }
+      } else if (e.target.classList.contains('dib-font-name-select')) {
+        tr.fontName = e.target.value;
+      }
+      this.#schedulePreview();
+    });
+
+    // Text Preview: column header clicks
     el.querySelector('.dib-text-preview')?.addEventListener('click', e => {
-      const linkBtn       = e.target.closest('[data-action="linkTextToTable"]');
-      const standaloneBtn = e.target.closest('[data-action="createFromText"]');
-      const removeLink    = e.target.closest('[data-action="removeTextLink"]');
-      if (linkBtn)       { this.#linkTextToTable(linkBtn.dataset.regionId); return; }
-      if (standaloneBtn) { this.#setTextStandalone(standaloneBtn.dataset.regionId); return; }
-      if (removeLink)    { this.#removeTextLink(removeLink.dataset.regionId, removeLink.dataset.fieldKey); return; }
       const th = e.target.closest('.dib-text-preview-th');
       if (th) this.#showTextColumnMenu(e, th);
     });
 
     // Scan cell clicks (Table Preview)
     el.querySelector('.dib-scan-content')?.addEventListener('click', e => {
-      const hdrBtn     = e.target.closest('.dib-set-headers-btn');
-      const linkTxtBtn = e.target.closest('.dib-add-linked-text-btn');
-      if (hdrBtn)     { e.stopPropagation(); this.#showSetHeadersPopover(e, hdrBtn.dataset.tableId); return; }
-      if (linkTxtBtn) { e.stopPropagation(); this.#linkTextToTable(linkTxtBtn.dataset.regionId); return; }
+      const hdrBtn = e.target.closest('.dib-set-headers-btn');
+      if (hdrBtn) { e.stopPropagation(); this.#showSetHeadersPopover(e, hdrBtn.dataset.tableId); return; }
       this.#handleScanClick(e);
     });
 
@@ -991,12 +1022,15 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
       // Scan text regions
       const textFields = rule.textFields?.length ? rule.textFields : null;
-      this._textScanData = {};
+      this._textScanData    = {};
+      this._textRegionFonts = {};
       for (const region of textRegions) {
         const page = pages.find(p => p.pageNum === region.page);
         if (!page) continue;
         const regionItems = this.#filterItemsToRegion(page, region);
         if (!regionItems.length) continue;
+
+        this._textRegionFonts[region.id] = extractRegionFonts(regionItems);
 
         let entries;
         if (textFields) {
@@ -1119,18 +1153,13 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     const textRegions = (rule.regions ?? []).filter(r => r.type === 'text');
     if (!textRegions.length) return null;
 
-    const textFields    = rule.textFields?.length ? rule.textFields : null;
-    const nameAttr      = (rule.attributes ?? []).find(a => a.foundryField === 'name' && !a.isVirtual);
-    const allEntries    = [];
-    const allLinkedAttrs = [];
-    const regionMeta    = [];
+    const textFields = rule.textFields?.length ? rule.textFields : null;
+    const nameAttr   = (rule.attributes ?? []).find(a => a.foundryField === 'name' && !a.isVirtual);
+    const allEntries = [];
 
     for (const region of textRegions) {
       const entries = this._textScanData[region.id] ?? [];
       allEntries.push(...entries);
-      const linkedAttrs = (rule.attributes ?? []).filter(a => a.isVirtual && a.textRegionId === region.id);
-      allLinkedAttrs.push(...linkedAttrs);
-      regionMeta.push({ id: region.id, label: region.label, standalone: region.standalone ?? false, linkedAttrs });
     }
 
     // Build column definitions
@@ -1161,7 +1190,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
     const enrichedEntries = allEntries.map(entry => {
       let matchStatus = 'unlinked';
-      const canMatch = hasTables && (joinField || (allLinkedAttrs.length && nameAttr));
+      const canMatch = hasTables && (joinField || nameAttr);
       if (canMatch) {
         const normEntry = normalizeItemName(entry._textName ?? '');
         let found = false;
@@ -1185,13 +1214,26 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       return { ...entry, _matchStatus: matchStatus, _cols };
     });
 
+    // Aggregate unique fonts across all text regions for the field rule dropdowns
+    const fontSet = new Map();
+    for (const region of textRegions) {
+      for (const f of (this._textRegionFonts[region.id] ?? [])) {
+        const key = `${f.fontSize}::${f.fontName}`;
+        if (!fontSet.has(key)) fontSet.set(key, f);
+      }
+    }
+    const availableFonts     = [...fontSet.values()].sort((a, b) => b.fontSize - a.fontSize || a.fontName.localeCompare(b.fontName));
+    const availableFontSizes = [...new Set(availableFonts.map(f => String(f.fontSize)))];
+    const availableFontNames = [...new Set(availableFonts.map(f => f.fontName))];
+
     return {
-      regions:        regionMeta,
       columns,
-      entries:        enrichedEntries,
-      linkedAttrs:    allLinkedAttrs,
-      hasEntries:     enrichedEntries.length > 0,
-      unmatchedCount: enrichedEntries.filter(e => e._matchStatus === 'unmatched').length
+      entries:           enrichedEntries,
+      hasEntries:        enrichedEntries.length > 0,
+      unmatchedCount:    enrichedEntries.filter(e => e._matchStatus === 'unmatched').length,
+      availableFonts,
+      availableFontSizes,
+      availableFontNames
     };
   }
 
@@ -1252,127 +1294,6 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     }
 
     this.#showContextMenu(event, menuItems);
-  }
-
-  // -------------------------------------------------------------------------
-  // Text region actions
-  // -------------------------------------------------------------------------
-
-  /**
-   * Open a dialog to pick which Foundry field receives this text region's data,
-   * then create a virtual attribute linking the text region to that field.
-   */
-  async #linkTextToTable(regionId) {
-    const rule = this.selectedRule;
-    if (!rule) return;
-
-    const region  = (rule.regions ?? []).find(r => r.id === regionId);
-    if (!region) return;
-
-    // Discover available field keys from the parsed entries.
-    // Exclude internal runtime keys added by buildTextScanContext (_matchStatus, _fields).
-    const INTERNAL_KEYS = new Set(['_matchStatus', '_fields']);
-    const entries  = this._textScanData[regionId] ?? [];
-    const rawKeys  = entries.length
-      ? [...new Set(entries.flatMap(e => Object.keys(e)))]
-      : ['_textName', '_textDescription'];
-    // Put _textDescription first (most common target), then _textName, then any labeled fields
-    const textKeys = [
-      ...(rawKeys.includes('_textDescription') ? ['_textDescription'] : []),
-      ...(rawKeys.includes('_textName')        ? ['_textName']        : []),
-      ...rawKeys.filter(k => !k.startsWith('_') && !INTERNAL_KEYS.has(k))
-    ].filter(k => !INTERNAL_KEYS.has(k));
-
-    const attrPaths = await getItemAttributePaths(rule.itemType);
-
-    const keyLabel = k => k === '_textDescription' ? 'Description (body text)' : k === '_textName' ? 'Name' : k;
-
-    // Show a dialog using Foundry's Dialog API
-    const content = `
-      <div style="display:grid;gap:8px;padding:4px 0">
-        <div>
-          <label style="font-weight:600;display:block;margin-bottom:4px">Text field to read from:</label>
-          <select id="dib-text-field-key" style="width:100%">
-            ${textKeys.map(k => `<option value="${k}">${keyLabel(k)}</option>`).join('')}
-          </select>
-        </div>
-        <div>
-          <label style="font-weight:600;display:block;margin-bottom:4px">Foundry attribute to set:</label>
-          <select id="dib-text-foundry-field" style="width:100%">
-            ${attrPaths.map(p => `<option value="${p.path}">${p.path}</option>`).join('')}
-          </select>
-        </div>
-      </div>`;
-
-    const result = await foundry.applications.api.DialogV2.prompt({
-      window: { title: `Link Text Region: ${region.label}` },
-      content,
-      ok: {
-        label: 'Link',
-        callback: (_e, _btn, dlg) => ({
-          key:   dlg.element.querySelector('#dib-text-field-key')?.value   ?? '',
-          field: dlg.element.querySelector('#dib-text-foundry-field')?.value ?? ''
-        })
-      },
-      rejectClose: false
-    }).catch(() => null);
-
-    if (!result?.key || !result?.field) return;
-    const fieldKey = result;
-
-    // Remove any existing virtual attr for this region+fieldKey combo
-    rule.attributes = (rule.attributes ?? []).filter(
-      a => !(a.isVirtual && a.textRegionId === regionId && a.columnHeader === fieldKey.key)
-    );
-
-    rule.attributes.push({
-      foundryField:  fieldKey.field,
-      columnHeader:  fieldKey.key,   // maps to the text entry field key
-      columnIndex:   '',
-      pattern:       '',
-      flags:         'i',
-      group:         1,
-      transform:     'trim',
-      source:        'textRegion',
-      textRegionId:  regionId,
-      isVirtual:     true
-    });
-
-    // Ensure region is not standalone when linking to table
-    region.standalone = false;
-    this.#schedulePreview();
-    this.render();
-  }
-
-  /** Mark a text region as standalone (creates items from text, no table join). */
-  #setTextStandalone(regionId) {
-    const rule = this.selectedRule;
-    if (!rule) return;
-    const region = (rule.regions ?? []).find(r => r.id === regionId);
-    if (!region) return;
-
-    region.standalone = !region.standalone;
-
-    // Remove virtual (linked) attrs for this region when going standalone
-    if (region.standalone) {
-      rule.attributes = (rule.attributes ?? []).filter(
-        a => !(a.isVirtual && a.textRegionId === regionId)
-      );
-    }
-
-    this.#schedulePreview();
-    this.render();
-  }
-
-  /** Remove a specific virtual attribute linking a text region field to a Foundry field. */
-  #removeTextLink(regionId, fieldKey) {
-    const rule = this.selectedRule;
-    if (!rule) return;
-    rule.attributes = (rule.attributes ?? []).filter(
-      a => !(a.isVirtual && a.textRegionId === regionId && a.columnHeader === fieldKey)
-    );
-    this.#schedulePreview();
-    this.render();
   }
 
   // -------------------------------------------------------------------------
@@ -1444,7 +1365,12 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     const tf = (rule.textFields ?? []).find(f => f.id === fieldId);
     if (!tf) return;
     tf.rules ??= [];
-    tf.rules.push({ id: foundry.utils.randomID(), type: target.dataset.ruleType ?? 'target', pattern: '' });
+    const ruleType = target.dataset.ruleType ?? 'regex-target';
+    if (ruleType === 'font-target') {
+      tf.rules.push({ id: foundry.utils.randomID(), type: 'font-target', fontSize: 'ALL', fontName: 'ALL' });
+    } else {
+      tf.rules.push({ id: foundry.utils.randomID(), type: ruleType, pattern: '' });
+    }
     this.render();
   }
 

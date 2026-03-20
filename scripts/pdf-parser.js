@@ -871,34 +871,73 @@ export function applyStripRules(entries, stripRules) {
  * @param {Object[]} fields  Ordered array of field definitions
  * @returns {Object[]} Array of entry objects keyed by field.id, plus _textName
  */
+/**
+ * Extract unique {fontSize, fontName} combinations from raw PDF items.
+ * fontSize is rounded to the nearest integer for stable comparison.
+ */
+export function extractRegionFonts(items) {
+  const seen = new Map();
+  for (const item of items) {
+    const size = Math.round(item.fontSize);
+    const key  = `${size}::${item.fontName}`;
+    if (!seen.has(key)) seen.set(key, { fontSize: size, fontName: item.fontName });
+  }
+  return [...seen.values()]
+    .sort((a, b) => b.fontSize - a.fontSize || a.fontName.localeCompare(b.fontName));
+}
+
 export function parseTextFields(items, fields) {
   if (!fields?.length || !items?.length) return [];
 
-  const rows = groupIntoRows(items)
-    .map(r => r.items.sort((a, b) => a.x - b.x).map(i => i.text).join(' ').trim())
-    .filter(Boolean);
-  if (!rows.length) return [];
+  // Build rows with font metadata (first item in each row as representative font)
+  const rowObjects = groupIntoRows(items)
+    .map(r => {
+      const sorted = r.items.sort((a, b) => a.x - b.x);
+      return {
+        text:     sorted.map(i => i.text).join(' ').trim(),
+        fontSize: sorted[0]?.fontSize ?? 0,
+        fontName: sorted[0]?.fontName ?? ''
+      };
+    })
+    .filter(o => o.text);
+  if (!rowObjects.length) return [];
 
-  // Boundary field: join-target field if present, else first field that has target rules
-  const boundaryField = fields.find(f => f.isJoinTarget) ?? fields.find(f =>
-    f.rules.some(r => r.type === 'target' && r.pattern?.trim())
-  ) ?? null;
+  // Build a combined matcher (font-target + regex-target) for a field's target rules.
+  // Returns null when the field has no active target rules.
+  function buildMatcher(field) {
+    const fontRules = (field.rules ?? []).filter(r =>
+      r.type === 'font-target' && (r.fontSize !== 'ALL' || r.fontName !== 'ALL')
+    );
+    const patterns = (field.rules ?? [])
+      .filter(r => (r.type === 'regex-target' || r.type === 'target') && r.pattern?.trim())
+      .map(r => r.pattern.trim());
+    const re = patterns.length ? safeRegexText(patterns.join('|'), 'i') : null;
+    if (!fontRules.length && !re) return null;
+    return (row) => {
+      for (const fr of fontRules) {
+        const sizeOk = !fr.fontSize || fr.fontSize === 'ALL' ||
+          Math.round(row.fontSize) === Math.round(Number(fr.fontSize));
+        const nameOk = !fr.fontName || fr.fontName === 'ALL' || row.fontName === fr.fontName;
+        if (!sizeOk || !nameOk) return false;
+      }
+      if (re && !re.test(row.text)) return false;
+      return true;
+    };
+  }
 
-  // Compile boundary regex from boundary field target rules
-  const boundaryPatterns = (boundaryField?.rules ?? [])
-    .filter(r => r.type === 'target' && r.pattern?.trim())
-    .map(r => r.pattern.trim());
-  const boundaryRe = boundaryPatterns.length
-    ? safeRegexText(boundaryPatterns.join('|'), 'i')
-    : null;
+  // Boundary field: isJoinTarget first, else first field with active target rules
+  const boundaryField = fields.find(f => f.isJoinTarget)
+    ?? fields.find(f => buildMatcher(f) !== null)
+    ?? null;
+  const boundaryMatcher = boundaryField ? buildMatcher(boundaryField) : null;
 
-  // Split all rows into per-item blocks at boundary matches
+  // Split rows into entry blocks at each boundary match
   let blocks;
-  if (boundaryRe) {
+  if (boundaryMatcher) {
     blocks = [];
     let current = null;
-    for (const row of rows) {
-      if (boundaryRe.test(row)) {
+    for (const row of rowObjects) {
+      if (boundaryMatcher(row)) {
         if (current) blocks.push(current);
         current = [row];
       } else if (current) {
@@ -908,50 +947,54 @@ export function parseTextFields(items, fields) {
     if (current) blocks.push(current);
     if (!blocks.length) return [];
   } else {
-    blocks = [rows];
+    blocks = [rowObjects];
   }
 
-  // Catch-all: non-boundary field with no target rules (gets all remaining text)
-  const catchAll = fields.find(f =>
-    f !== boundaryField &&
-    !f.rules.some(r => r.type === 'target' && r.pattern?.trim())
-  ) ?? null;
+  // Catch-all: non-boundary field with no active target rules (gets all remaining text)
+  const catchAll = fields.find(f => f !== boundaryField && buildMatcher(f) === null) ?? null;
 
-  return blocks.map(block => _extractTextFieldValues(block, fields, boundaryField, boundaryRe, catchAll));
+  return blocks.map(block =>
+    _extractTextFieldValues(block, fields, boundaryField, catchAll, buildMatcher)
+  );
 }
 
-function _extractTextFieldValues(block, fields, boundaryField, boundaryRe, catchAll) {
+function _extractTextFieldValues(block, fields, boundaryField, catchAll, buildMatcher) {
   const entry = {};
   let remaining = [...block];
 
   for (const field of fields) {
-    const targets = field.rules
-      .filter(r => r.type === 'target' && r.pattern?.trim())
-      .map(r => r.pattern.trim());
-
     let rawValue;
 
-    if (field === boundaryField && boundaryRe) {
-      // Extract only the matched portion of the boundary row.
-      // The text after the match is prepended to remaining so subsequent fields can claim it.
-      const firstRow = block[0] ?? '';
-      const m = boundaryRe.exec(firstRow);
-      rawValue = m ? firstRow.slice(m.index, m.index + m[0].length) : firstRow;
-      const afterMatch = m ? firstRow.slice(m.index + m[0].length).trim() : '';
-      remaining = afterMatch ? [afterMatch, ...block.slice(1)] : block.slice(1);
+    if (field === boundaryField) {
+      // Extract only the regex-matched portion of the boundary row text.
+      // Font-target rules select which rows are boundaries but don't trim text content.
+      // Unmatched text after the regex match flows to subsequent fields.
+      const firstRow  = block[0];
+      const firstText = firstRow?.text ?? '';
+      const patterns  = (field.rules ?? [])
+        .filter(r => (r.type === 'regex-target' || r.type === 'target') && r.pattern?.trim())
+        .map(r => r.pattern.trim());
+      const re      = patterns.length ? safeRegexText(patterns.join('|'), 'i') : null;
+      const m       = re ? re.exec(firstText) : null;
+      rawValue      = m ? firstText.slice(m.index, m.index + m[0].length) : firstText;
+      const afterText = m ? firstText.slice(m.index + m[0].length).trim() : '';
+      remaining = afterText
+        ? [{ ...firstRow, text: afterText }, ...block.slice(1)]
+        : block.slice(1);
     } else if (field === catchAll) {
-      rawValue  = remaining.join(' ');
+      rawValue  = remaining.map(r => r.text).join(' ');
       remaining = [];
-    } else if (targets.length) {
-      const re      = safeRegexText(targets.join('|'), 'i');
-      const claimed = remaining.filter(row => re?.test(row));
-      remaining     = remaining.filter(row => !re?.test(row));
-      rawValue      = claimed.join(' ');
     } else {
-      rawValue = '';
+      const matcher = buildMatcher(field);
+      if (matcher) {
+        const claimed = remaining.filter(row => matcher(row));
+        remaining     = remaining.filter(row => !matcher(row));
+        rawValue      = claimed.map(r => r.text).join(' ');
+      } else {
+        rawValue = '';
+      }
     }
 
-    // Apply strip rules
     rawValue = _applyFieldStrips(rawValue, field.rules);
     entry[field.id] = rawValue;
     if (field === boundaryField) entry._textName = rawValue;

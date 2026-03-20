@@ -1,7 +1,8 @@
-# v1.x.x
+# v1.2.x
 
 ## Major
-- Began work on text area data sources for descriptions
+- Text field Scanning to create non-table Items / Join Table items.
+
 ## Minor
 
 # V1.1.0

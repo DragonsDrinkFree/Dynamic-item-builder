@@ -399,15 +399,6 @@
                         title="Manually name the columns for this table">
                   <i class="fas fa-pencil-alt"></i> Create Headers
                 </button>
-                {{#if ../hasTextRegions}}
-                {{#each ../textScanContext.regions}}
-                <button type="button" class="dib-btn dib-btn-sm dib-btn-accent dib-add-linked-text-btn"
-                        data-region-id="{{this.id}}"
-                        title="Link '{{this.label}}' text to a Foundry attribute (joins by item name)">
-                  <i class="fas fa-link"></i> Link "{{this.label}}"
-                </button>
-                {{/each}}
-                {{/if}}
               </div>
               <div class="scan-table-scroll">
                 <table class="scan-table">
@@ -472,7 +463,7 @@
         <div class="dib-text-preview">
 
           {{!-- Field Rules --}}
-          <div class="dib-field-rules-section">
+          <div class="dib-field-rules-section" data-fonts="{{textFontsJson}}">
             <div class="dib-field-rules-header">
               <button class="dib-btn dib-btn-sm" data-action="refreshPreview"
                       title="Apply field rules and refresh text preview">
@@ -508,11 +499,32 @@
               </div>
               {{#each this.rules}}
               <div class="dib-text-rule-row" data-rule-id="{{this.id}}">
-                <span class="dib-text-rule-badge dib-text-rule-{{this.type}}">{{this.type}}</span>
+                <span class="dib-text-rule-badge dib-text-rule-{{this.type}}">
+                  {{#if (eq this.type "font-target")}}FONT{{else if (eq this.type "strip")}}STRIP{{else}}REGEX{{/if}}
+                </span>
+                {{#if (eq this.type "font-target")}}
+                <select class="dib-font-select dib-font-size-select"
+                        data-field-id="{{../id}}" data-rule-id="{{this.id}}"
+                        title="Filter by font size (ALL = any size)">
+                  <option value="ALL" {{#if (eq this.fontSize "ALL")}}selected{{/if}}>ALL sizes</option>
+                  {{#each @root.textScanContext.availableFontSizes}}
+                  <option value="{{this}}" {{#if (eq this ../fontSize)}}selected{{/if}}>{{this}}pt</option>
+                  {{/each}}
+                </select>
+                <select class="dib-font-select dib-font-name-select"
+                        data-field-id="{{../id}}" data-rule-id="{{this.id}}"
+                        title="Filter by font name (ALL = any font)">
+                  <option value="ALL" {{#if (eq this.fontName "ALL")}}selected{{/if}}>ALL fonts</option>
+                  {{#each @root.textScanContext.availableFontNames}}
+                  <option value="{{this}}" {{#if (eq this ../fontName)}}selected{{/if}}>{{this}}</option>
+                  {{/each}}
+                </select>
+                {{else}}
                 <input type="text" class="dib-text-rule-input"
                        value="{{this.pattern}}"
                        data-field-id="{{../id}}" data-rule-id="{{this.id}}"
-                       placeholder="{{#if (eq this.type 'target')}}Regex to identify rows…{{else}}Pattern to strip from result…{{/if}}">
+                       placeholder="{{#if (eq this.type 'strip')}}Pattern to strip from result…{{else}}Regex to identify rows…{{/if}}">
+                {{/if}}
                 <button class="dib-btn dib-btn-icon" data-action="moveTextFieldRule"
                         data-dir="up" title="Move rule up">
                   <i class="fas fa-chevron-up"></i>
@@ -534,8 +546,12 @@
               {{/unless}}
               <div class="dib-text-field-rule-adder">
                 <button class="dib-btn dib-btn-sm" data-action="addTextFieldRule"
-                        data-rule-type="target" title="Add a regex to identify which rows belong to this field">
-                  <i class="fas fa-plus"></i> Target
+                        data-rule-type="regex-target" title="Add a regex pattern to identify which rows belong to this field">
+                  <i class="fas fa-plus"></i> Regex Target
+                </button>
+                <button class="dib-btn dib-btn-sm" data-action="addTextFieldRule"
+                        data-rule-type="font-target" title="Add a font filter to identify which rows belong to this field">
+                  <i class="fas fa-plus"></i> Font Target
                 </button>
                 <button class="dib-btn dib-btn-sm" data-action="addTextFieldRule"
                         data-rule-type="strip" title="Add a pattern to strip from this field's captured text">
@@ -551,48 +567,6 @@
           </div>
 
           {{#if textScanContext}}
-            {{!-- Per-region controls (one compact row per region) --}}
-            <div class="dib-text-region-controls">
-              {{#each textScanContext.regions}}
-              <div class="dib-text-region-control-row">
-                <span class="dib-text-region-label"><i class="fas fa-align-left"></i> {{this.label}}</span>
-                <div class="dib-text-region-actions">
-                  {{#if this.standalone}}
-                  <button class="dib-btn dib-btn-sm dib-btn-active"
-                          data-action="createFromText"
-                          data-region-id="{{this.id}}"
-                          title="Creating standalone items from this region. Click to disable.">
-                    <i class="fas fa-file-alt"></i> Standalone
-                  </button>
-                  {{else}}
-                  <button class="dib-btn dib-btn-sm"
-                          data-action="createFromText"
-                          data-region-id="{{this.id}}"
-                          title="Create items from this region without joining a table">
-                    <i class="fas fa-file-alt"></i> Standalone
-                  </button>
-                  <button class="dib-btn dib-btn-sm dib-btn-accent"
-                          data-action="linkTextToTable"
-                          data-region-id="{{this.id}}"
-                          title="Link a field from this region to a Foundry attribute">
-                    <i class="fas fa-link"></i> Link to Table
-                  </button>
-                  {{/if}}
-                  {{#each this.linkedAttrs}}
-                  <span class="dib-text-linked-tag">
-                    {{this.columnHeader}} → {{this.foundryField}}
-                    <button class="dib-text-unlink-btn"
-                            data-action="removeTextLink"
-                            data-region-id="{{../id}}"
-                            data-field-key="{{this.columnHeader}}"
-                            title="Remove this link">×</button>
-                  </span>
-                  {{/each}}
-                </div>
-              </div>
-              {{/each}}
-            </div>
-
             {{!-- Merged entry table --}}
             <div class="dib-text-preview-meta">
               {{textScanContext.entries.length}} entr{{#if (eq textScanContext.entries.length 1)}}y{{else}}ies{{/if}}

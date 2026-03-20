@@ -1861,8 +1861,20 @@ div.ignore-tr {
   flex-shrink: 0;
   letter-spacing: 0.03em;
 }
-.dib-text-rule-target { background: rgba(80, 160, 80, 0.25); color: #80d080; }
-.dib-text-rule-strip  { background: rgba(200, 100, 50, 0.25); color: #e09060; }
+.dib-text-rule-target,
+.dib-text-rule-regex-target { background: rgba(80, 160, 80, 0.25); color: #80d080; }
+.dib-text-rule-font-target  { background: rgba(120, 80, 200, 0.25); color: #b08ede; }
+.dib-text-rule-strip        { background: rgba(200, 100, 50, 0.25); color: #e09060; }
+.dib-font-select {
+  font-size: 11px;
+  padding: 2px 4px;
+  background: var(--dib-input-bg, rgba(0,0,0,0.3));
+  border: 1px solid rgba(107, 95, 160, 0.3);
+  border-radius: 3px;
+  color: inherit;
+  flex: 1;
+  min-width: 0;
+}
 .dib-text-rule-input {
   flex: 1;
   font-size: 12px;
