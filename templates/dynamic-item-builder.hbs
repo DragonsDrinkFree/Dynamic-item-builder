@@ -150,6 +150,9 @@
           {{#if tableRegionCount}}
           <span class="dib-tab-badge">{{tableRegionCount}}T</span>
           {{/if}}
+          {{#if textRegionCount}}
+          <span class="dib-tab-badge dib-tab-badge-text">{{textRegionCount}}X</span>
+          {{/if}}
         </button>
         <button class="dib-tab {{#if itemPlannerTabActive}}active{{/if}}" data-center-tab="item-planner">
           <i class="fas fa-list-ul"></i>
@@ -179,6 +182,10 @@
             <button class="dib-btn dib-draw-btn {{#if (eq drawMode "table")}}active{{/if}}"
                     data-draw-mode="table" title="Draw table region">
               <i class="fas fa-table"></i> Table Region
+            </button>
+            <button class="dib-btn dib-draw-btn dib-draw-btn-text {{#if (eq drawMode "text")}}active{{/if}}"
+                    data-draw-mode="text" title="Draw text region for descriptive text or structured entries">
+              <i class="fas fa-align-left"></i> Text Region
             </button>
           </div>
 
@@ -232,6 +239,37 @@
                     <i class="fas fa-times"></i>
                   </button>
                 </div>
+                {{#if (eq this.type "text")}}
+                <div class="dib-region-text-config">
+                  <div class="dib-region-text-row">
+                    <label title="Description block: multiple entries per region. Structured: single item per region (spell, ability, etc.)">
+                      Entry type:
+                    </label>
+                    <select data-region-field="entryType" data-region-id="{{this.id}}">
+                      <option value="description" {{#if (eq this.entryType "description")}}selected{{/if}}>Description block</option>
+                      <option value="structured"  {{#if (eq this.entryType "structured")}}selected{{/if}}>Structured entry</option>
+                    </select>
+                  </div>
+                  <div class="dib-region-text-row">
+                    <label title="Use bold/larger font to detect entry names automatically">
+                      <input type="checkbox"
+                             data-region-field="useFont"
+                             data-region-id="{{this.id}}"
+                             {{#if this.useFont}}checked{{/if}}>
+                      Font detection
+                    </label>
+                  </div>
+                  <div class="dib-region-text-row">
+                    <input type="text"
+                           class="dib-region-name-pattern"
+                           placeholder="Name regex (optional)…"
+                           value="{{this.namePattern}}"
+                           data-region-field="namePattern"
+                           data-region-id="{{this.id}}"
+                           title="Regex to detect entry name lines. Leave blank to rely on font detection.">
+                  </div>
+                </div>
+                {{/if}}
               </div>
               {{/each}}
             {{else}}
@@ -365,6 +403,15 @@
           <span class="dib-loading"><i class="fas fa-spinner fa-spin"></i></span>
           {{/if}}
         </button>
+        {{#if hasTextRegions}}
+        <button class="dib-tab dib-tab-text {{#if textTabActive}}active{{/if}}" data-tab="text">
+          <i class="fas fa-align-left"></i>
+          <span>Text Preview</span>
+          {{#if textRegionCount}}
+          <span class="dib-tab-badge dib-tab-badge-text">{{textRegionCount}}</span>
+          {{/if}}
+        </button>
+        {{/if}}
         <button class="dib-tab {{#if previewTabActive}}active{{/if}} {{#if previewHasContent}}dib-tab-has-preview{{/if}}" data-tab="preview">
           <i class="fas fa-eye"></i>
           <span>Items Preview</span>
@@ -391,6 +438,15 @@
                         title="Manually name the columns for this table">
                   <i class="fas fa-pencil-alt"></i> Create Headers
                 </button>
+                {{#if ../hasTextRegions}}
+                {{#each ../textScanContext}}
+                <button type="button" class="dib-btn dib-btn-sm dib-btn-accent dib-add-linked-text-btn"
+                        data-region-id="{{this.id}}"
+                        title="Link '{{this.label}}' text to a Foundry attribute (joins by item name)">
+                  <i class="fas fa-link"></i> Link "{{this.label}}"
+                </button>
+                {{/each}}
+                {{/if}}
               </div>
               <div class="scan-table-scroll">
                 <table class="scan-table">
@@ -445,6 +501,121 @@
           <div class="scan-empty">
             <i class="fas fa-file-pdf"></i>
             <p>Draw table regions in the <strong>PDF Planner</strong>, then click <strong>Refresh</strong>.</p>
+          </div>
+          {{/if}}
+        </div>
+      </div>
+
+      {{!-- ── TEXT PREVIEW ── --}}
+      <div class="dib-tab-panel {{#if textTabActive}}active{{/if}}" id="dib-tab-text">
+        <div class="dib-text-preview">
+          {{#if textScanContext.length}}
+            {{#each textScanContext}}
+            <div class="dib-text-region-section" data-region-id="{{this.id}}">
+
+              <div class="dib-text-region-header">
+                <span class="dib-text-region-label">
+                  <i class="fas fa-align-left"></i> {{this.label}}
+                </span>
+                <span class="dib-text-region-meta">
+                  {{this.entries.length}} entr{{#if (eq this.entries.length 1)}}y{{else}}ies{{/if}}
+                  {{#if this.unmatchedCount}}
+                  · <span class="dib-text-unmatched-count">{{this.unmatchedCount}} unmatched</span>
+                  {{/if}}
+                </span>
+                <div class="dib-text-region-actions">
+                  {{#if this.standalone}}
+                  <button class="dib-btn dib-btn-sm dib-btn-active"
+                          data-action="createFromText"
+                          data-region-id="{{this.id}}"
+                          title="Creating standalone items from this text region. Click to disable.">
+                    <i class="fas fa-file-alt"></i> Standalone
+                  </button>
+                  {{else}}
+                  <button class="dib-btn dib-btn-sm"
+                          data-action="createFromText"
+                          data-region-id="{{this.id}}"
+                          title="Create items from this text region without joining a table">
+                    <i class="fas fa-file-alt"></i> Standalone
+                  </button>
+                  <button class="dib-btn dib-btn-sm dib-btn-accent"
+                          data-action="linkTextToTable"
+                          data-region-id="{{this.id}}"
+                          title="Link a field from this text region to a Foundry attribute (joins to table by name)">
+                    <i class="fas fa-link"></i> Link to Table
+                  </button>
+                  {{/if}}
+                </div>
+              </div>
+
+              {{!-- Linked attributes summary --}}
+              {{#if this.linkedAttrs.length}}
+              <div class="dib-text-linked-attrs">
+                {{#each this.linkedAttrs}}
+                <span class="dib-text-linked-tag">
+                  {{this.columnHeader}} → {{this.foundryField}}
+                  <button class="dib-text-unlink-btn"
+                          data-action="removeTextLink"
+                          data-region-id="{{../id}}"
+                          data-field-key="{{this.columnHeader}}"
+                          title="Remove this link">×</button>
+                </span>
+                {{/each}}
+              </div>
+              {{/if}}
+
+              {{!-- Entry table --}}
+              {{#if this.hasEntries}}
+              <div class="dib-text-entries-scroll">
+                <table class="dib-text-entries-table">
+                  <thead>
+                    <tr>
+                      <th class="dib-text-entry-name-col">Name</th>
+                      {{#each this.fieldKeys}}
+                      <th>{{this}}</th>
+                      {{/each}}
+                      <th class="dib-text-entry-desc-col">Description</th>
+                      {{#if this.linkedAttrs.length}}
+                      <th class="dib-text-entry-match-col">Match</th>
+                      {{/if}}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {{#each this.entries}}
+                    <tr class="dib-text-entry-row dib-text-match-{{this._matchStatus}}">
+                      <td class="dib-text-entry-name">{{this._textName}}</td>
+                      {{#each this._fields}}
+                      <td>{{this.value}}</td>
+                      {{/each}}
+                      <td class="dib-text-entry-desc" title="{{this._textDescription}}">
+                        {{truncate this._textDescription 80}}
+                      </td>
+                      {{#if ../linkedAttrs.length}}
+                      <td class="dib-text-match-cell">
+                        {{#if (eq this._matchStatus "matched")}}
+                        <i class="fas fa-check dib-match-ok" title="Matched to table row"></i>
+                        {{else if (eq this._matchStatus "unmatched")}}
+                        <i class="fas fa-exclamation-triangle dib-match-warn" title="No matching table row found"></i>
+                        {{/if}}
+                      </td>
+                      {{/if}}
+                    </tr>
+                    {{/each}}
+                  </tbody>
+                </table>
+              </div>
+              {{else}}
+              <div class="dib-text-empty">
+                <i class="fas fa-spinner fa-spin"></i> No entries detected yet — click <strong>Refresh</strong>.
+              </div>
+              {{/if}}
+
+            </div>
+            {{/each}}
+          {{else}}
+          <div class="scan-empty">
+            <i class="fas fa-align-left"></i>
+            <p>Draw <strong>Text Region</strong> areas in the <strong>PDF Planner</strong>, then click <strong>Refresh</strong>.</p>
           </div>
           {{/if}}
         </div>

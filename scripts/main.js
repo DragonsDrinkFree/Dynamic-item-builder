@@ -12,6 +12,12 @@ Hooks.once('init', () => {
   // Resolve a dot-notation field path on a flat object (e.g. "system.damage" on {system.damage: "1d8"})
   Handlebars.registerHelper('getField', (obj, field) => obj?.[field] ?? '');
 
+  // Truncate a string to maxLen characters, appending '…' if trimmed
+  Handlebars.registerHelper('truncate', (str, maxLen) => {
+    const s = String(str ?? '');
+    return s.length > maxLen ? s.slice(0, maxLen) + '…' : s;
+  });
+
   game.settings.register('dynamic-item-builder', 'savedRuleSets', {
     name: 'Saved Rule Sets',
     scope: 'world',

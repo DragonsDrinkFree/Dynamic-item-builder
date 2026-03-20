@@ -3,7 +3,7 @@
  * an array of detected items: [{ name, [foundryField]: value, ... }]
  */
 
-import { extractPages, parsePageString, mergePageItems, detectColumns, mapRowsToCells, detectTables, applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits } from './pdf-parser.js';
+import { extractPages, parsePageString, mergePageItems, groupIntoRows, detectColumns, mapRowsToCells, detectTables, applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits, parseDescriptionBlock, parseStructuredEntry, normalizeItemName } from './pdf-parser.js';
 
 /**
  * Apply a rule to a loaded PDF document.
@@ -15,11 +15,13 @@ export async function applyRule(rule, pdfDoc) {
   const pageNums = parsePageString(rule.pages ?? '1', pdfDoc.numPages);
   const pages    = await extractPages(pdfDoc, pageNums);
 
-  // Region-based path: when the user has painted table regions, use the same
+  // Region-based path: when the user has painted regions, use the same
   // detectTables() pipeline as the Table Preview so column structure is identical.
   const tableRegions = (rule.regions ?? []).filter(r => r.type === 'table');
-  if (tableRegions.length > 0) {
-    return applyRuleWithRegions(rule, pages, tableRegions);
+  const textRegions  = (rule.regions ?? []).filter(r => r.type === 'text');
+
+  if (tableRegions.length > 0 || textRegions.length > 0) {
+    return applyRuleWithRegions(rule, pages, tableRegions, textRegions);
   }
 
   // Auto-detect fallback (no regions defined)
@@ -30,10 +32,12 @@ export async function applyRule(rule, pdfDoc) {
 
 /**
  * Region-aware extraction path.
- * Mirrors the collation logic in DynamicItemBuilderApp.#scanTableRegions so that
- * the column structure seen in Table Preview exactly matches what is extracted here.
+ * Handles table regions (existing behaviour) and text regions (new).
+ * Text regions are parsed into a name-keyed map and either:
+ *   - injected as virtual column values into matched table rows, or
+ *   - used to create standalone items when region.standalone === true.
  */
-function applyRuleWithRegions(rule, pages, regions) {
+function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
   // Group regions by their `group` key, in page→Y order
   const groups = new Map();
   for (const region of [...regions].sort((a, b) => a.page - b.page || a.y - b.y)) {
@@ -78,6 +82,45 @@ function applyRuleWithRegions(rule, pages, regions) {
   applyColumnMerges(allTables, rule.columnMerges);
   applyColumnSplits(allTables, rule.columnSplits);
 
+  // Parse text regions → build per-region name→entry maps
+  // regionTextMaps: Map<regionId, Map<normalizedName, entryObject>>
+  const regionTextMaps = new Map();
+  const standaloneTextItems = [];
+
+  for (const region of textRegions) {
+    const page = pages.find(p => p.pageNum === region.page);
+    if (!page) continue;
+
+    const regionItems = page.items.filter(item =>
+      item.x >= region.x            &&
+      item.x <= region.x + region.w &&
+      item.y >= region.y            &&
+      item.y <= region.y + region.h
+    );
+    if (!regionItems.length) continue;
+
+    const entries = region.entryType === 'structured'
+      ? (parseStructuredEntry(regionItems) ? [parseStructuredEntry(regionItems)] : [])
+      : parseDescriptionBlock(regionItems, {
+          namePattern: region.namePattern,
+          useFont:     region.useFont ?? true
+        });
+
+    if (region.standalone) {
+      standaloneTextItems.push(...entries);
+    } else {
+      const nameMap = new Map();
+      for (const entry of entries) {
+        nameMap.set(normalizeItemName(entry._textName), entry);
+      }
+      regionTextMaps.set(region.id, nameMap);
+    }
+  }
+
+  // Virtual-column attributes: attributes with source === 'textRegion'
+  const virtualAttrs  = (rule.attributes ?? []).filter(a => a.isVirtual && a.textRegionId);
+  const regularAttrs  = (rule.attributes ?? []).filter(a => !a.isVirtual);
+
   const skipRe  = rule.skipPattern?.trim() ? safeRegex(rule.skipPattern) : null;
   const results = [];
 
@@ -99,12 +142,74 @@ function applyRuleWithRegions(rule, pages, regions) {
       if (!rowText.trim()) continue;
       if (skipRe?.test(rowText)) continue;
 
-      const item = extractAttributes(cells, rule.attributes, rule);
-      if (item) results.push(item);
+      const item = extractAttributes(cells, regularAttrs, rule);
+      if (!item) continue;
+
+      // Inject virtual column values from matched text region entries
+      if (virtualAttrs.length) {
+        // Determine this row's name for joining (use the attribute linked to 'name')
+        const nameAttr = regularAttrs.find(a => a.foundryField === 'name');
+        const rowName  = nameAttr ? (cells[nameAttr.columnHeader] ?? '') : '';
+        const normName = normalizeItemName(rowName);
+
+        for (const vAttr of virtualAttrs) {
+          const nameMap = regionTextMaps.get(vAttr.textRegionId);
+          if (!nameMap) continue;
+          const matched = findTextMatch(normName, nameMap);
+          if (!matched) continue;
+
+          // The virtual attribute's columnHeader maps to a field in the text entry.
+          // By convention: '_textDescription' or any detected labeled field name.
+          const textFieldKey = vAttr.columnHeader;
+          const rawValue = matched[textFieldKey] ?? '';
+          const value = applyTransform(String(rawValue).trim(), vAttr.transform);
+          if (value !== '') setNestedValue(item, vAttr.foundryField, value);
+        }
+      }
+
+      results.push(item);
+    }
+  }
+
+  // Standalone text-only items — only use virtual attrs for standalone regions
+  const standaloneRegionIds = new Set(textRegions.filter(r => r.standalone).map(r => r.id));
+  if (standaloneTextItems.length) {
+    const textOnlyAttrs = (rule.attributes ?? []).filter(
+      a => a.isVirtual && standaloneRegionIds.has(a.textRegionId)
+    );
+    for (const entry of standaloneTextItems) {
+      const item = {};
+      let hasData = false;
+      for (const attr of textOnlyAttrs) {
+        if (!attr.foundryField) continue;
+        const rawValue = entry[attr.columnHeader] ?? '';
+        const value = applyTransform(String(rawValue).trim(), attr.transform);
+        if (value !== '') {
+          hasData = true;
+          setNestedValue(item, attr.foundryField, value);
+        }
+      }
+      if (hasData) results.push(item);
     }
   }
 
   return results;
+}
+
+/**
+ * Find a text entry in a name map by exact match then substring match.
+ * @param {string} normName  normalizeItemName() result for the table row
+ * @param {Map}    nameMap   Map<normalizedName, entry>
+ */
+function findTextMatch(normName, nameMap) {
+  if (!normName) return null;
+  // Exact match
+  if (nameMap.has(normName)) return nameMap.get(normName);
+  // Substring: table name contained in text name, or vice versa
+  for (const [key, entry] of nameMap) {
+    if (key.includes(normName) || normName.includes(key)) return entry;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

@@ -684,4 +684,264 @@ function findBestColumn(item, columns) {
   return best;
 }
 
-// detectTextSections removed — text region scanning is not used
+
+// ---------------------------------------------------------------------------
+// Text region parsing
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a name string for join/match comparisons.
+ * Lowercases, trims, removes trailing colon/punctuation, collapses whitespace.
+ */
+export function normalizeItemName(str) {
+  return String(str ?? '')
+    .toLowerCase()
+    .trim()
+    .replace(/:+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Determine whether a PDF text item appears to be bold or a heading.
+ *
+ * @param {Object} item           PDF text item
+ * @param {number} medianFontSize median fontSize of the whole block
+ * @param {string} [rowBodyFont]  most-common font name in this row (body text font);
+ *                                if provided and differs from item.fontName, the item
+ *                                is treated as a heading (handles subset-embedded PDFs
+ *                                where bold fonts have non-descriptive names)
+ */
+function isHeadingItem(item, medianFontSize, rowBodyFont) {
+  if (/bold|heavy|black/i.test(item.fontName ?? '')) return true;
+  if ((item.fontSize ?? 0) > medianFontSize + 1.5) return true;
+  // Mixed-font heuristic: if this row has two distinct font names, the minority
+  // font at the start of the row is the name/heading (inline bold pattern).
+  if (rowBodyFont && item.fontName && item.fontName !== rowBodyFont) return true;
+  return false;
+}
+
+/**
+ * Parse a block of items that contains multiple named entries
+ * (e.g. a page of Edges, armour descriptions, feats).
+ *
+ * Each entry starts when a heading item is detected (bold font or larger
+ * fontSize), optionally refined by a user-supplied namePattern regex.
+ *
+ * Returns: [{ _textName, _textDescription, [labeledField]: value, ... }]
+ *
+ * @param {Object[]} items   PDF text items within a region
+ * @param {Object}   config
+ * @param {string}   [config.namePattern]  optional regex to detect name lines
+ * @param {boolean}  [config.useFont=true] use font heuristics for name detection
+ */
+export function parseDescriptionBlock(items, config = {}) {
+  const { namePattern, useFont = true } = config;
+  const nameRe = namePattern?.trim() ? safeRegexText(namePattern, 'i') : null;
+
+  const rows = groupIntoRows(items);
+  if (!rows.length) return [];
+
+  // Compute median fontSize for the whole block
+  const allSizes = items.map(i => i.fontSize).filter(Boolean).sort((a, b) => a - b);
+  const medianSize = allSizes[Math.floor(allSizes.length / 2)] ?? 0;
+
+  const entries = [];
+  let current = null;
+
+  for (const row of rows) {
+    if (!row.items.length) continue;
+
+    const sortedItems = [...row.items].sort((a, b) => a.x - b.x);
+    const rowText = sortedItems.map(i => i.text).join(' ').trim();
+    if (!rowText) continue;
+
+    let isNameRow = false;
+    let nameText = '';
+    let descStart = '';
+
+    // Font heuristic: heading items at the start of the row
+    if (useFont) {
+      const firstX = sortedItems[0].x;
+
+      // Compute the majority (body) font name in this row.
+      // If the row has mixed fonts, the most-common font = body text;
+      // items at the row start with a different font = heading/name.
+      let rowBodyFont = null;
+      if (sortedItems.length > 1) {
+        const counts = {};
+        for (const i of sortedItems) {
+          if (i.fontName) counts[i.fontName] = (counts[i.fontName] ?? 0) + 1;
+        }
+        const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+        // Only use the mixed-font heuristic when there are at least 2 fonts
+        // AND the majority font appears more than once (avoids 1-item rows)
+        if (sorted.length >= 2 && sorted[0][1] > 1) rowBodyFont = sorted[0][0];
+      }
+
+      const headingItems = sortedItems.filter(i =>
+        isHeadingItem(i, medianSize, rowBodyFont) && Math.abs(i.x - firstX) < 20
+      );
+
+      if (headingItems.length > 0) {
+        isNameRow = true;
+        nameText = headingItems.map(i => i.text).join(' ').replace(/:$/, '').trim();
+        // Remaining non-heading items on the same row start the description
+        const restItems = sortedItems.filter(i => !headingItems.includes(i));
+        descStart = restItems.map(i => i.text).join(' ').trim();
+      }
+    }
+
+    // Regex fallback / override
+    if (!isNameRow && nameRe) {
+      const m = nameRe.exec(rowText);
+      if (m) {
+        isNameRow = true;
+        nameText = (m[1] ?? m[0]).replace(/:$/, '').trim();
+        descStart = rowText.slice(m.index + m[0].length).trim();
+      }
+    }
+
+    if (isNameRow && nameText) {
+      if (current) entries.push(current);
+      current = { _textName: nameText, _textDescription: descStart };
+    } else if (current) {
+      // Check for a labeled field line: "FieldName: value text"
+      const fieldMatch = /^([A-Z][A-Za-z][A-Za-z\s]{0,28}):\s+(.+)/.exec(rowText);
+      if (fieldMatch) {
+        const key = fieldMatch[1].trim();
+        const val = fieldMatch[2].trim();
+        // Avoid clobbering the reserved internal fields
+        if (key !== '_textName' && key !== '_textDescription') {
+          current[key] = current[key] ? current[key] + ' ' + val : val;
+        } else {
+          current._textDescription = current._textDescription
+            ? current._textDescription + ' ' + rowText
+            : rowText;
+        }
+      } else {
+        current._textDescription = current._textDescription
+          ? current._textDescription + ' ' + rowText
+          : rowText;
+      }
+    }
+  }
+
+  if (current) entries.push(current);
+  return entries;
+}
+
+/**
+ * Parse a block of items that represents a single structured entry
+ * (e.g. one spell, one ability). The name is identified by the largest
+ * fontSize cluster at the top of the block. `Label: value` pairs (which may
+ * appear in two columns side-by-side) become individual named fields.
+ * Everything else becomes `_textDescription`.
+ *
+ * Returns a single object: { _textName, [fieldName]: value, ..., _textDescription }
+ *
+ * @param {Object[]} items  PDF text items within the region
+ */
+export function parseStructuredEntry(items) {
+  if (!items.length) return null;
+
+  const rows = groupIntoRows(items);
+  if (!rows.length) return null;
+
+  const allSizes = items.map(i => i.fontSize).filter(Boolean).sort((a, b) => b - a);
+  const maxSize = allSizes[0] ?? 0;
+  // Name: items in the topmost row(s) that share the max (or near-max) fontSize
+  const nameItems = [];
+  for (const row of rows) {
+    const headings = row.items.filter(i => (i.fontSize ?? 0) >= maxSize - 1);
+    if (headings.length > 0) {
+      nameItems.push(...headings);
+      // Only use name rows at the very top — stop when we hit a row that has
+      // no heading-size items (the content block begins)
+    } else {
+      break;
+    }
+  }
+
+  const _textName = nameItems
+    .sort((a, b) => a.x - b.x)
+    .map(i => i.text)
+    .join(' ')
+    .replace(/:$/, '')
+    .trim();
+
+  // Remaining items (below the name rows)
+  const nameYMax = nameItems.length ? Math.max(...nameItems.map(i => i.y)) : -Infinity;
+  const bodyRows = rows.filter(r => r.y > nameYMax + 0.5);
+
+  const entry = { _textName, _textDescription: '' };
+
+  // Label-field regex: "SomeLabel: value text here"
+  const labelRe = /^([A-Z][A-Za-z][A-Za-z\s]{0,28}):\s+(.+)/;
+
+  for (const row of bodyRows) {
+    const sortedItems = [...row.items].sort((a, b) => a.x - b.x);
+    const rowText = sortedItems.map(i => i.text).join(' ').trim();
+    if (!rowText) continue;
+
+    // For multi-column labeled fields, detect an X gap within the row.
+    // If a significant gap exists, treat each column half independently.
+    const xPositions = sortedItems.map(i => i.x);
+    const rowWidth = Math.max(...sortedItems.map(i => i.x + (i.width ?? 0))) - Math.min(...xPositions);
+    let splitX = null;
+
+    if (sortedItems.length >= 4 && rowWidth > 60) {
+      // Find the largest internal gap
+      let maxGap = 0;
+      let maxGapIdx = -1;
+      for (let i = 1; i < sortedItems.length; i++) {
+        const prevEnd = sortedItems[i - 1].x + (sortedItems[i - 1].width ?? 0);
+        const gap = sortedItems[i].x - prevEnd;
+        if (gap > maxGap && gap > 20) {
+          maxGap = gap;
+          maxGapIdx = i;
+        }
+      }
+      if (maxGapIdx !== -1) {
+        splitX = (sortedItems[maxGapIdx - 1].x + (sortedItems[maxGapIdx - 1].width ?? 0) +
+                  sortedItems[maxGapIdx].x) / 2;
+      }
+    }
+
+    const halves = splitX !== null
+      ? [
+          sortedItems.filter(i => i.x < splitX),
+          sortedItems.filter(i => i.x >= splitX)
+        ]
+      : [sortedItems];
+
+    let anyFieldFound = false;
+    for (const half of halves) {
+      const text = half.map(i => i.text).join(' ').trim();
+      if (!text) continue;
+      const m = labelRe.exec(text);
+      if (m) {
+        const key = m[1].trim();
+        const val = m[2].trim();
+        if (key !== '_textName' && key !== '_textDescription') {
+          entry[key] = entry[key] ? entry[key] + ' ' + val : val;
+          anyFieldFound = true;
+        }
+      }
+    }
+
+    if (!anyFieldFound) {
+      entry._textDescription = entry._textDescription
+        ? entry._textDescription + ' ' + rowText
+        : rowText;
+    }
+  }
+
+  entry._textDescription = entry._textDescription.trim();
+  return entry;
+}
+
+// Regex helper local to text parsing (avoids coupling with rule-engine.js)
+function safeRegexText(pattern, flags = '') {
+  try { return new RegExp(pattern, flags); } catch { return null; }
+}

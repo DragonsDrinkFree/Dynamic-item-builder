@@ -8,7 +8,8 @@
 
 import {
   loadPDF, extractPages, parsePageString, mergePageItems,
-  detectTables, renderPageToCanvas, applyColumnMerges, applyColumnSplits
+  detectTables, renderPageToCanvas, applyColumnMerges, applyColumnSplits,
+  parseDescriptionBlock, parseStructuredEntry, normalizeItemName
 } from '../pdf-parser.js';
 import { applyRule }   from '../rule-engine.js';
 import { buildItems }  from '../item-builder.js';
@@ -80,6 +81,9 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
   /** @type {Object|null} detectTables() result for current rule */
   _scanData = null;
+
+  /** @type {Object} region.id → parsed text entries array */
+  _textScanData = {};
 
   // ── Tab state ──────────────────────────────────────────────────────────────
 
@@ -199,7 +203,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       .map(f => ({ id: f.id, name: '\u00a0'.repeat((f.depth ?? 0) * 2) + f.name }));
 
     // Guard: removed tabs — fall back to tables
-    if (this._rightTab === 'suggested' || this._rightTab === 'text') this._rightTab = 'tables';
+    if (this._rightTab === 'suggested') this._rightTab = 'tables';
 
     // Attribute link suggestions — computed from detected columns vs available paths
     const suggestions = rule && attributePaths.length && this._scanData
@@ -264,9 +268,14 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       drawMode:    this._drawMode,
       // Right panel tabs
       tablesTabActive:  this._rightTab === 'tables',
+      textTabActive:    this._rightTab === 'text',
       previewTabActive: this._rightTab === 'preview',
       // Region counts for badges
       tableRegionCount: (rule?.regions ?? []).filter(r => r.type === 'table').length,
+      textRegionCount:  (rule?.regions ?? []).filter(r => r.type === 'text').length,
+      hasTextRegions:   (rule?.regions ?? []).some(r => r.type === 'text'),
+      // Text scan data for the Text Preview tab
+      textScanContext:  this.#buildTextScanContext(rule),
       // Attribute mapping list
       attributeList,
       suggestionCount,
@@ -373,7 +382,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       viewport.addEventListener('mousedown', e => this.#handlePlannerMousedown(e));
     }
 
-    // Region sidebar: label + group field changes
+    // Region sidebar: label + group + text region config field changes
     el.querySelector('.dib-region-sidebar')?.addEventListener('change', e => {
       const input = e.target.closest('[data-region-field]');
       if (!input) return;
@@ -381,13 +390,29 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       const field = input.dataset.regionField;
       const rule  = this.selectedRule;
       const region = (rule?.regions ?? []).find(r => r.id === id);
-      if (region) { region[field] = input.value; this.#updateRegionOverlay(); }
+      if (!region) return;
+      // Checkboxes use .checked; selects and text inputs use .value
+      region[field] = input.type === 'checkbox' ? input.checked : input.value;
+      this.#schedulePreview();
+      this.#updateRegionOverlay();
+    });
+
+    // Text Preview: "Link to table" and "Create from Text" buttons
+    el.querySelector('.dib-text-preview')?.addEventListener('click', e => {
+      const linkBtn       = e.target.closest('[data-action="linkTextToTable"]');
+      const standaloneBtn = e.target.closest('[data-action="createFromText"]');
+      const removeLink    = e.target.closest('[data-action="removeTextLink"]');
+      if (linkBtn)       this.#linkTextToTable(linkBtn.dataset.regionId);
+      if (standaloneBtn) this.#setTextStandalone(standaloneBtn.dataset.regionId);
+      if (removeLink)    this.#removeTextLink(removeLink.dataset.regionId, removeLink.dataset.fieldKey);
     });
 
     // Scan cell clicks (Table Preview)
     el.querySelector('.dib-scan-content')?.addEventListener('click', e => {
-      const hdrBtn = e.target.closest('.dib-set-headers-btn');
-      if (hdrBtn) { e.stopPropagation(); this.#showSetHeadersPopover(e, hdrBtn.dataset.tableId); return; }
+      const hdrBtn     = e.target.closest('.dib-set-headers-btn');
+      const linkTxtBtn = e.target.closest('.dib-add-linked-text-btn');
+      if (hdrBtn)     { e.stopPropagation(); this.#showSetHeadersPopover(e, hdrBtn.dataset.tableId); return; }
+      if (linkTxtBtn) { e.stopPropagation(); this.#linkTextToTable(linkTxtBtn.dataset.regionId); return; }
       this.#handleScanClick(e);
     });
 
@@ -654,7 +679,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     const count     = rule.regions.filter(r => r.type === this._drawMode).length + 1;
     const group     = `${this._drawMode}-${count}`;
 
-    rule.regions.push({
+    const newRegion = {
       id:    foundry.utils.randomID(),
       type:  this._drawMode,
       group,
@@ -662,7 +687,19 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       x: Math.round(rect.x), y: Math.round(rect.y),
       w: Math.round(rect.w), h: Math.round(rect.h),
       label: `${typeLabel} ${count}`
-    });
+    };
+
+    // Text regions get extra configuration fields
+    if (this._drawMode === 'text') {
+      Object.assign(newRegion, {
+        entryType:   'description',
+        namePattern: '',
+        useFont:     true,
+        standalone:  false
+      });
+    }
+
+    rule.regions.push(newRegion);
 
     this.#schedulePreview();
     this.render();
@@ -904,6 +941,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       const pageNums     = parsePageString(rule.pages, this._pdf.numPages);
       const pages        = await extractPages(this._pdf, pageNums);
       const tableRegions = (rule.regions ?? []).filter(r => r.type === 'table');
+      const textRegions  = (rule.regions ?? []).filter(r => r.type === 'text');
 
       if (tableRegions.length > 0) {
         this._scanData = this.#scanTableRegions(pages, tableRegions);
@@ -911,6 +949,23 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         // Auto-detect fallback
         const allItems = mergePageItems(pages);
         this._scanData = detectTables(allItems);
+      }
+
+      // Scan text regions
+      this._textScanData = {};
+      for (const region of textRegions) {
+        const page = pages.find(p => p.pageNum === region.page);
+        if (!page) continue;
+        const regionItems = this.#filterItemsToRegion(page, region);
+        if (!regionItems.length) continue;
+
+        const entries = region.entryType === 'structured'
+          ? (parseStructuredEntry(regionItems) ? [parseStructuredEntry(regionItems)] : [])
+          : parseDescriptionBlock(regionItems, {
+              namePattern: region.namePattern,
+              useFont:     region.useFont ?? true
+            });
+        this._textScanData[region.id] = entries;
       }
     } catch (err) {
       console.warn('Dynamic Item Builder | Scan error:', err);
@@ -1019,6 +1074,195 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
     tables.forEach((t, i) => { t.id = `tbl-${i}`; });
     return { tables, proseRows };
+  }
+
+  /**
+   * Build the data context for the Text Preview tab.
+   * Returns an array of region objects, each with their parsed entries enriched
+   * with match status (matched/unmatched/unlinked) relative to the table scan.
+   */
+  #buildTextScanContext(rule) {
+    if (!rule) return [];
+    const textRegions = (rule.regions ?? []).filter(r => r.type === 'text');
+    if (!textRegions.length) return [];
+
+    // Name attribute used for joining (first non-virtual attr linked to 'name')
+    const nameAttr = (rule.attributes ?? []).find(a => a.foundryField === 'name' && !a.isVirtual);
+
+    return textRegions.map(region => {
+      const entries = this._textScanData[region.id] ?? null;
+
+      // Collect all detected field keys across entries (for dynamic column headers)
+      const fieldKeys = entries
+        ? [...new Set(entries.flatMap(e => Object.keys(e).filter(k => !k.startsWith('_'))))]
+        : [];
+
+      // Virtual attributes that draw from this region
+      const linkedAttrs = (rule.attributes ?? []).filter(
+        a => a.isVirtual && a.textRegionId === region.id
+      );
+
+      // Enrich each entry with match status and pre-built field array for the template
+      const enrichedEntries = (entries ?? []).map(entry => {
+        let matchStatus = 'unlinked';
+        if (!region.standalone && linkedAttrs.length && nameAttr) {
+          const normEntry = normalizeItemName(entry._textName);
+          let found = false;
+          for (const table of (this._scanData?.tables ?? [])) {
+            for (const row of table.rows) {
+              if (row._injected || row._sectionHeader) continue;
+              const nameCell = row.cells.find(c => c.column === nameAttr.columnHeader);
+              if (!nameCell) continue;
+              const normRow = normalizeItemName(nameCell.value);
+              if (normRow === normEntry || normRow.includes(normEntry) || normEntry.includes(normRow)) {
+                found = true;
+                break;
+              }
+            }
+            if (found) break;
+          }
+          matchStatus = found ? 'matched' : 'unmatched';
+        }
+        // Pre-build field pairs so the template doesn't need nested #each context tricks
+        const _fields = fieldKeys.map(k => ({ key: k, value: entry[k] ?? '' }));
+        return { ...entry, _matchStatus: matchStatus, _fields };
+      });
+
+      return {
+        id:          region.id,
+        label:       region.label,
+        entryType:   region.entryType   ?? 'description',
+        namePattern: region.namePattern ?? '',
+        useFont:     region.useFont     ?? true,
+        standalone:  region.standalone  ?? false,
+        entries:     enrichedEntries,
+        fieldKeys,
+        linkedAttrs,
+        hasEntries:  enrichedEntries.length > 0,
+        unmatchedCount: enrichedEntries.filter(e => e._matchStatus === 'unmatched').length
+      };
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Text region actions
+  // -------------------------------------------------------------------------
+
+  /**
+   * Open a dialog to pick which Foundry field receives this text region's data,
+   * then create a virtual attribute linking the text region to that field.
+   */
+  async #linkTextToTable(regionId) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+
+    const region  = (rule.regions ?? []).find(r => r.id === regionId);
+    if (!region) return;
+
+    // Discover available field keys from the parsed entries.
+    // Exclude internal runtime keys added by buildTextScanContext (_matchStatus, _fields).
+    const INTERNAL_KEYS = new Set(['_matchStatus', '_fields']);
+    const entries  = this._textScanData[regionId] ?? [];
+    const rawKeys  = entries.length
+      ? [...new Set(entries.flatMap(e => Object.keys(e)))]
+      : ['_textName', '_textDescription'];
+    // Put _textDescription first (most common target), then _textName, then any labeled fields
+    const textKeys = [
+      ...(rawKeys.includes('_textDescription') ? ['_textDescription'] : []),
+      ...(rawKeys.includes('_textName')        ? ['_textName']        : []),
+      ...rawKeys.filter(k => !k.startsWith('_') && !INTERNAL_KEYS.has(k))
+    ].filter(k => !INTERNAL_KEYS.has(k));
+
+    const attrPaths = await getItemAttributePaths(rule.itemType);
+
+    const keyLabel = k => k === '_textDescription' ? 'Description (body text)' : k === '_textName' ? 'Name' : k;
+
+    // Show a dialog using Foundry's Dialog API
+    const content = `
+      <div style="display:grid;gap:8px;padding:4px 0">
+        <div>
+          <label style="font-weight:600;display:block;margin-bottom:4px">Text field to read from:</label>
+          <select id="dib-text-field-key" style="width:100%">
+            ${textKeys.map(k => `<option value="${k}">${keyLabel(k)}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label style="font-weight:600;display:block;margin-bottom:4px">Foundry attribute to set:</label>
+          <select id="dib-text-foundry-field" style="width:100%">
+            ${attrPaths.map(p => `<option value="${p.path}">${p.path}</option>`).join('')}
+          </select>
+        </div>
+      </div>`;
+
+    const result = await foundry.applications.api.DialogV2.prompt({
+      window: { title: `Link Text Region: ${region.label}` },
+      content,
+      ok: {
+        label: 'Link',
+        callback: (_e, _btn, dlg) => ({
+          key:   dlg.element.querySelector('#dib-text-field-key')?.value   ?? '',
+          field: dlg.element.querySelector('#dib-text-foundry-field')?.value ?? ''
+        })
+      },
+      rejectClose: false
+    }).catch(() => null);
+
+    if (!result?.key || !result?.field) return;
+    const fieldKey = result;
+
+    // Remove any existing virtual attr for this region+fieldKey combo
+    rule.attributes = (rule.attributes ?? []).filter(
+      a => !(a.isVirtual && a.textRegionId === regionId && a.columnHeader === fieldKey.key)
+    );
+
+    rule.attributes.push({
+      foundryField:  fieldKey.field,
+      columnHeader:  fieldKey.key,   // maps to the text entry field key
+      columnIndex:   '',
+      pattern:       '',
+      flags:         'i',
+      group:         1,
+      transform:     'trim',
+      source:        'textRegion',
+      textRegionId:  regionId,
+      isVirtual:     true
+    });
+
+    // Ensure region is not standalone when linking to table
+    region.standalone = false;
+    this.#schedulePreview();
+    this.render();
+  }
+
+  /** Mark a text region as standalone (creates items from text, no table join). */
+  #setTextStandalone(regionId) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    const region = (rule.regions ?? []).find(r => r.id === regionId);
+    if (!region) return;
+
+    region.standalone = !region.standalone;
+
+    // Remove virtual (linked) attrs for this region when going standalone
+    if (region.standalone) {
+      rule.attributes = (rule.attributes ?? []).filter(
+        a => !(a.isVirtual && a.textRegionId === regionId)
+      );
+    }
+
+    this.#schedulePreview();
+    this.render();
+  }
+
+  /** Remove a specific virtual attribute linking a text region field to a Foundry field. */
+  #removeTextLink(regionId, fieldKey) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    rule.attributes = (rule.attributes ?? []).filter(
+      a => !(a.isVirtual && a.textRegionId === regionId && a.columnHeader === fieldKey)
+    );
+    this.#schedulePreview();
+    this.render();
   }
 
   // -------------------------------------------------------------------------
