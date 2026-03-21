@@ -3,7 +3,7 @@
  * an array of detected items: [{ name, [foundryField]: value, ... }]
  */
 
-import { extractPages, parsePageString, mergePageItems, filterItemsToRegion, groupIntoRows, detectColumns, mapRowsToCells, detectTables, applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits, parseDescriptionBlock, parseTextFields, applyStripRules, normalizeItemName } from './pdf-parser.js';
+import { extractPages, parsePageString, mergePageItems, filterItemsToRegion, collectTableRegionItems, groupIntoRows, detectColumns, mapRowsToCells, detectTables, applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits, parseTextRegion, normalizeItemName } from './pdf-parser.js';
 import { safeRegex, setNestedValue } from './utils.js';
 
 /**
@@ -39,26 +39,7 @@ export async function applyRule(rule, pdfDoc) {
  *   - used to create standalone items when region.standalone === true.
  */
 function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
-  // All table regions are one logical pool — sort page→Y, apply y-offsets,
-  // then run detectTables once. Must mirror DynamicItemBuilderApp.#scanTableRegions.
-  const sorted = [...regions].sort((a, b) => a.page - b.page || a.y - b.y);
-  let yOffset  = 0;
-  const allItems = [];
-
-  for (const region of sorted) {
-    const page = pages.find(p => p.pageNum === region.page);
-    if (!page) continue;
-    const regionItems = filterItemsToRegion(page.items, region);
-    for (const item of regionItems) {
-      allItems.push({ ...item, y: item.y + yOffset });
-    }
-    if (regionItems.length) {
-      yOffset += Math.max(...regionItems.map(i => i.y)) + 50;
-    }
-  }
-
-  const allTables = allItems.length ? detectTables(allItems).tables : [];
-  allTables.forEach((t, i) => { t.id = `tbl-${i}`; });
+  const { tables: allTables } = collectTableRegionItems(pages, regions);
 
   // Apply the same transforms as the Table Preview so attribute mappings align
   applyManualHeaderOverrides(allTables, rule.manualHeaders);
@@ -69,7 +50,6 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
   // regionTextMaps: Map<regionId, Map<normalizedName, entryObject>>
   const regionTextMaps = new Map();
   const standaloneTextItems = [];
-
   const textFields = rule.textFields?.length ? rule.textFields : null;
 
   for (const region of textRegions) {
@@ -79,19 +59,7 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
     const regionItems = filterItemsToRegion(page.items, region);
     if (!regionItems.length) continue;
 
-    let entries;
-    if (textFields) {
-      entries = parseTextFields(regionItems, textFields);
-    } else {
-      const textRules   = rule.textRules ?? [];
-      const namePattern = textRules
-        .filter(r => r.type === 'target' && r.pattern?.trim())
-        .map(r => r.pattern.trim())
-        .join('|') || undefined;
-      const stripRules  = textRules.filter(r => r.type === 'strip' && r.pattern?.trim());
-      entries = parseDescriptionBlock(regionItems, { namePattern, useFont: true });
-      applyStripRules(entries, stripRules);
-    }
+    const entries = parseTextRegion(regionItems, rule);
 
     if (region.standalone) {
       standaloneTextItems.push(...entries);
@@ -139,21 +107,9 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
         const normName = normalizeItemName(rowName);
 
         if (textFields) {
-          // New path: inject each data field's value via its foundryAttr
           for (const [, nameMap] of regionTextMaps) {
             const matched = findTextMatch(normName, nameMap);
-            if (!matched) continue;
-            for (const field of textFields) {
-              if (!field.foundryAttr) continue;
-              // Prefer HTML value when format rules produced one (HTML is the final output)
-              const htmlVal  = matched[field.id + '__html'] ?? null;
-              const rawValue = htmlVal ?? String(matched[field.id] ?? '').trim();
-              if (rawValue !== '') setNestedValue(item, field.foundryAttr, rawValue);
-              if (htmlVal) {
-                if (!item.__htmlFields) item.__htmlFields = {};
-                item.__htmlFields[field.foundryAttr] = htmlVal;
-              }
-            }
+            if (matched) applyTextFieldValues(item, matched, textFields);
           }
         } else if (virtualAttrs.length) {
           // Old path: virtual attribute column mapping
@@ -179,17 +135,7 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
     for (const [, nameMap] of regionTextMaps) {
       for (const [, entry] of nameMap) {
         const item = {};
-        let hasData = false;
-        for (const field of textFields) {
-          if (!field.foundryAttr) continue;
-          const htmlVal  = entry[field.id + '__html'] ?? null;
-          const rawValue = htmlVal ?? String(entry[field.id] ?? '').trim();
-          if (rawValue !== '') { hasData = true; setNestedValue(item, field.foundryAttr, rawValue); }
-          if (htmlVal) {
-            if (!item.__htmlFields) item.__htmlFields = {};
-            item.__htmlFields[field.foundryAttr] = htmlVal;
-          }
-        }
+        const hasData = applyTextFieldValues(item, entry, textFields);
         if (hasData) {
           const rowText = Object.values(entry).join(' ');
           if (skipRe?.test(rowText)) continue;
@@ -206,17 +152,7 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
       let hasData = false;
 
       if (textFields) {
-        // New path: each field's value → foundryAttr
-        for (const field of textFields) {
-          if (!field.foundryAttr) continue;
-          const htmlVal  = entry[field.id + '__html'] ?? null;
-          const rawValue = htmlVal ?? String(entry[field.id] ?? '').trim();
-          if (rawValue !== '') { hasData = true; setNestedValue(item, field.foundryAttr, rawValue); }
-          if (htmlVal) {
-            if (!item.__htmlFields) item.__htmlFields = {};
-            item.__htmlFields[field.foundryAttr] = htmlVal;
-          }
-        }
+        hasData = applyTextFieldValues(item, entry, textFields);
       } else {
         // Old path: virtual attrs
         const standaloneRegionIds = new Set(textRegions.filter(r => r.standalone).map(r => r.id));
@@ -236,6 +172,30 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
   }
 
   return results;
+}
+
+/**
+ * Apply text field values from a parsed entry onto an item object.
+ * Handles HTML-enriched values and tracks them in __htmlFields.
+ *
+ * @param {Object} item       — target item to populate
+ * @param {Object} entry      — parsed text entry (keyed by field.id)
+ * @param {Array}  textFields — rule.textFields definitions
+ * @returns {boolean} true if any value was set
+ */
+function applyTextFieldValues(item, entry, textFields) {
+  let hasData = false;
+  for (const field of textFields) {
+    if (!field.foundryAttr) continue;
+    const htmlVal  = entry[field.id + '__html'] ?? null;
+    const rawValue = htmlVal ?? String(entry[field.id] ?? '').trim();
+    if (rawValue !== '') { hasData = true; setNestedValue(item, field.foundryAttr, rawValue); }
+    if (htmlVal) {
+      if (!item.__htmlFields) item.__htmlFields = {};
+      item.__htmlFields[field.foundryAttr] = htmlVal;
+    }
+  }
+  return hasData;
 }
 
 /**

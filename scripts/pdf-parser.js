@@ -176,6 +176,41 @@ export function filterItemsToRegion(items, region) {
   );
 }
 
+/**
+ * Collect text items from multiple table regions into a single pool,
+ * then run table detection on the combined result.
+ *
+ * Regions are sorted by page then Y position.  Items from successive
+ * regions receive a cumulative Y offset so they appear as one continuous
+ * stream to the table detector.
+ *
+ * @param {Object[]} pages    return value of extractPages()
+ * @param {Object[]} regions  table region descriptors ({ page, x, y, w, h })
+ * @returns {{ tables: Object[], proseRows: Object[] }}
+ */
+export function collectTableRegionItems(pages, regions) {
+  const sorted = [...regions].sort((a, b) => a.page - b.page || a.y - b.y);
+  let yOffset  = 0;
+  const allItems = [];
+
+  for (const region of sorted) {
+    const page = pages.find(p => p.pageNum === region.page);
+    if (!page) continue;
+    const regionItems = filterItemsToRegion(page.items, region);
+    for (const item of regionItems) {
+      allItems.push({ ...item, y: item.y + yOffset });
+    }
+    if (regionItems.length) {
+      yOffset += Math.max(...regionItems.map(i => i.y)) + 50;
+    }
+  }
+
+  if (!allItems.length) return { tables: [], proseRows: [] };
+  const result = detectTables(allItems);
+  result.tables.forEach((t, i) => { t.id = `tbl-${i}`; });
+  return result;
+}
+
 export function mergePageItems(pages, pageGap = 50) {
   let yOffset = 0;
   const allItems = [];
@@ -894,6 +929,31 @@ export function extractRegionFonts(items) {
   }
   return [...seen.values()]
     .sort((a, b) => b.fontSize - a.fontSize || a.fontName.localeCompare(b.fontName));
+}
+
+/**
+ * Parse a text region's items using the appropriate strategy.
+ * Uses parseTextFields() when rule.textFields are defined (field-based path),
+ * otherwise falls back to parseDescriptionBlock() with strip rules (legacy path).
+ *
+ * @param {Array} regionItems  — pre-filtered items within the region bounds
+ * @param {Object} rule        — the full rule object
+ * @returns {Array}  parsed entries
+ */
+export function parseTextRegion(regionItems, rule) {
+  const textFields = rule.textFields?.length ? rule.textFields : null;
+  if (textFields) {
+    return parseTextFields(regionItems, textFields);
+  }
+  const textRules   = rule.textRules ?? [];
+  const namePattern = textRules
+    .filter(r => r.type === 'target' && r.pattern?.trim())
+    .map(r => r.pattern.trim())
+    .join('|') || undefined;
+  const stripRules  = textRules.filter(r => r.type === 'strip' && r.pattern?.trim());
+  const entries = parseDescriptionBlock(regionItems, { namePattern, useFont: true });
+  applyStripRules(entries, stripRules);
+  return entries;
 }
 
 export function parseTextFields(items, fields) {

@@ -8,8 +8,9 @@
 
 import {
   loadPDF, extractPages, parsePageString, mergePageItems, filterItemsToRegion,
-  detectTables, renderPageToCanvas, applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits,
-  parseDescriptionBlock, parseTextFields, extractRegionFonts, applyStripRules, normalizeItemName
+  collectTableRegionItems, detectTables, renderPageToCanvas,
+  applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits,
+  parseTextRegion, extractRegionFonts, normalizeItemName
 } from '../pdf-parser.js';
 import { applyRule }   from '../rule-engine.js';
 import { buildItems }  from '../item-builder.js';
@@ -1041,7 +1042,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       const textRegions  = (rule.regions ?? []).filter(r => r.type === 'text');
 
       if (tableRegions.length > 0) {
-        this._scanData = this.#scanTableRegions(pages, tableRegions);
+        this._scanData = collectTableRegionItems(pages, tableRegions);
       } else {
         // Auto-detect fallback
         const allItems = mergePageItems(pages);
@@ -1049,7 +1050,6 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       }
 
       // Scan text regions
-      const textFields = rule.textFields?.length ? rule.textFields : null;
       this._textScanData    = {};
       this._textRegionFonts = {};
       for (const region of textRegions) {
@@ -1059,21 +1059,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         if (!regionItems.length) continue;
 
         this._textRegionFonts[region.id] = extractRegionFonts(regionItems);
-
-        let entries;
-        if (textFields) {
-          entries = parseTextFields(regionItems, textFields);
-        } else {
-          const textRules   = rule.textRules ?? [];
-          const namePattern = textRules
-            .filter(r => r.type === 'target' && r.pattern?.trim())
-            .map(r => r.pattern.trim())
-            .join('|') || undefined;
-          const stripRules = textRules.filter(r => r.type === 'strip' && r.pattern?.trim());
-          entries = parseDescriptionBlock(regionItems, { namePattern, useFont: true });
-          applyStripRules(entries, stripRules);
-        }
-        this._textScanData[region.id] = entries;
+        this._textScanData[region.id] = parseTextRegion(regionItems, rule);
       }
     } catch (err) {
       console.warn('Dynamic Item Builder | Scan error:', err);
@@ -1104,35 +1090,6 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
   #applyColumnSplits(rule) {
     if (!this._scanData?.tables || !rule?.columnSplits) return;
     applyColumnSplits(this._scanData.tables, rule.columnSplits);
-  }
-
-  /**
-   * Extract and collate table regions.
-   * Regions sharing the same `group` have their rows merged (columns from
-   * the first region in the group are used as the canonical schema).
-   */
-  #scanTableRegions(pages, regions) {
-    // All table regions on a rule are one logical pool — sort page→Y, apply y-offsets
-    const sorted = [...regions].sort((a, b) => a.page - b.page || a.y - b.y);
-    let yOffset  = 0;
-    const allItems = [];
-
-    for (const region of sorted) {
-      const page = pages.find(p => p.pageNum === region.page);
-      if (!page) continue;
-      const regionItems = filterItemsToRegion(page.items, region);
-      for (const item of regionItems) {
-        allItems.push({ ...item, y: item.y + yOffset });
-      }
-      if (regionItems.length) {
-        yOffset += Math.max(...regionItems.map(i => i.y)) + 50;
-      }
-    }
-
-    if (!allItems.length) return { tables: [], proseRows: [] };
-    const result = detectTables(allItems);
-    result.tables.forEach((t, i) => { t.id = `tbl-${i}`; });
-    return result;
   }
 
   /**
