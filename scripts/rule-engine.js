@@ -154,8 +154,14 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
             if (!matched) continue;
             for (const field of textFields) {
               if (!field.foundryAttr) continue;
-              const rawValue = String(matched[field.id] ?? '').trim();
+              // Prefer HTML value when format rules produced one (HTML is the final output)
+              const htmlVal  = matched[field.id + '__html'] ?? null;
+              const rawValue = htmlVal ?? String(matched[field.id] ?? '').trim();
               if (rawValue !== '') setNestedValue(item, field.foundryAttr, rawValue);
+              if (htmlVal) {
+                if (!item.__htmlFields) item.__htmlFields = {};
+                item.__htmlFields[field.foundryAttr] = htmlVal;
+              }
             }
           }
         } else if (virtualAttrs.length) {
@@ -185,8 +191,13 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
         let hasData = false;
         for (const field of textFields) {
           if (!field.foundryAttr) continue;
-          const rawValue = String(entry[field.id] ?? '').trim();
+          const htmlVal  = entry[field.id + '__html'] ?? null;
+          const rawValue = htmlVal ?? String(entry[field.id] ?? '').trim();
           if (rawValue !== '') { hasData = true; setNestedValue(item, field.foundryAttr, rawValue); }
+          if (htmlVal) {
+            if (!item.__htmlFields) item.__htmlFields = {};
+            item.__htmlFields[field.foundryAttr] = htmlVal;
+          }
         }
         if (hasData) {
           const rowText = Object.values(entry).join(' ');
@@ -207,8 +218,13 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
         // New path: each field's value → foundryAttr
         for (const field of textFields) {
           if (!field.foundryAttr) continue;
-          const rawValue = String(entry[field.id] ?? '').trim();
+          const htmlVal  = entry[field.id + '__html'] ?? null;
+          const rawValue = htmlVal ?? String(entry[field.id] ?? '').trim();
           if (rawValue !== '') { hasData = true; setNestedValue(item, field.foundryAttr, rawValue); }
+          if (htmlVal) {
+            if (!item.__htmlFields) item.__htmlFields = {};
+            item.__htmlFields[field.foundryAttr] = htmlVal;
+          }
         }
       } else {
         // Old path: virtual attrs

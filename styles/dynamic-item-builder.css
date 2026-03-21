@@ -924,6 +924,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* HTML-formatted cells: allow wrapping and style inline markup */
+.preview-td p          { margin: 0 0 0.4em 0; white-space: normal; overflow: visible; text-overflow: clip; }
+.preview-td p:last-child { margin-bottom: 0; }
+.preview-td strong     { font-weight: 700; }
+.preview-td em         { font-style: italic; }
+.preview-td h1,.preview-td h2,.preview-td h3,.preview-td h4 { margin: 0 0 0.2em 0; font-weight: 700; }
 
 .preview-none {
   font-size: 11px;
@@ -1865,6 +1871,62 @@ div.ignore-tr {
 .dib-text-rule-regex-target { background: rgba(80, 160, 80, 0.25); color: #80d080; }
 .dib-text-rule-font-target  { background: rgba(120, 80, 200, 0.25); color: #b08ede; }
 .dib-text-rule-strip        { background: rgba(200, 100, 50, 0.25); color: #e09060; }
+.dib-text-rule-format       { background: rgba(50, 140, 200, 0.25); color: #6ab4e8; }
+
+/* Format rule: two-line layout */
+.dib-format-rule-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+}
+.dib-format-rule-top {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px;
+}
+.dib-format-rule-top .dib-text-rule-input { flex: 1; min-width: 0; }
+.dib-fmt-group-input {
+  width: 38px;
+  font-size: 11px;
+  padding: 2px 3px;
+  text-align: center;
+  background: var(--dib-input-bg, rgba(0,0,0,0.3));
+  border: 1px solid rgba(50, 140, 200, 0.3);
+  border-radius: 3px;
+  color: inherit;
+  flex-shrink: 0;
+}
+.dib-format-options {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 4px 32px;
+  border-top: 1px solid rgba(50, 140, 200, 0.15);
+  flex-wrap: wrap;
+}
+.dib-fmt-opt {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.dib-fmt-opt input[type="checkbox"] { margin: 0; cursor: pointer; }
+.dib-fmt-opt strong { font-weight: 700; font-size: 12px; }
+.dib-fmt-opt em     { font-style: italic; font-size: 12px; }
+.dib-fmt-opt u      { text-decoration: underline; font-size: 12px; }
+.dib-fmt-header-select {
+  font-size: 11px;
+  padding: 1px 3px;
+  background: var(--dib-input-bg, rgba(0,0,0,0.3));
+  border: 1px solid rgba(50, 140, 200, 0.3);
+  border-radius: 3px;
+  color: inherit;
+}
 .dib-font-select {
   font-size: 11px;
   padding: 2px 4px;

@@ -194,6 +194,10 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
               const flat   = foundry.utils.flattenObject(item);
               flat._dibKey = dibKey;
               flat._key    = `${r.id}::${dibKey}`;
+              // Auto-flag cells that carry HTML from format rules so the template renders them safely
+              if (item.__htmlFields) {
+                for (const hField of Object.keys(item.__htmlFields)) flat[`__html__${hField}`] = true;
+              }
               // Apply any per-cell value overrides
               const ovr = this._cellOverrides[r.id]?.[dibKey] ?? {};
               for (const [ovField, ovVal] of Object.entries(ovr)) flat[ovField] = ovVal;
@@ -440,10 +444,10 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       const prop = e.target.dataset.fieldProp;
       if (prop === 'header')      { tf.header      = e.target.value; return; }
       if (prop === 'foundryAttr') { tf.foundryAttr = e.target.value; return; }
-      // Rule pattern input inside this field
-      const ruleEl = e.target.closest('[data-rule-id]');
-      if (ruleEl) {
-        const tr = (tf.rules ?? []).find(r => r.id === ruleEl.dataset.ruleId);
+      // Rule pattern input inside this field — only when the target itself has data-rule-id
+      // (avoids picking up checkboxes/selects inside format rule rows whose ancestor has it)
+      if (e.target.dataset.ruleId) {
+        const tr = (tf.rules ?? []).find(r => r.id === e.target.dataset.ruleId);
         if (tr) tr.pattern = e.target.value;
       }
     });
@@ -457,7 +461,20 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       if (!fieldEl || !ruleEl) return;
       const tf = (rule.textFields ?? []).find(f => f.id === fieldEl.dataset.fieldId);
       const tr = (tf?.rules ?? []).find(r => r.id === ruleEl.dataset.ruleId);
-      if (!tr || tr.type !== 'font-target') return;
+      if (!tr) return;
+
+      // Format rule: checkboxes and header select
+      if (tr.type === 'format') {
+        const prop = e.target.dataset.formatProp;
+        if (!prop) return;
+        tr[prop] = e.target.type === 'checkbox' ? e.target.checked
+                 : e.target.type === 'number'   ? Number(e.target.value)
+                 : e.target.value;
+        this.#schedulePreview();
+        return;
+      }
+
+      if (tr.type !== 'font-target') return;
 
       if (e.target.classList.contains('dib-font-size-select')) {
         tr.fontSize = e.target.value;
@@ -1002,7 +1019,9 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
   async #runScan() {
     const rule = this.selectedRule;
     if (!this._pdf || !rule?.pages) {
-      this._scanData = null;
+      this._scanData        = null;
+      this._textScanData    = {};
+      this._textRegionFonts = {};
       return;
     }
 
@@ -1368,6 +1387,13 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     const ruleType = target.dataset.ruleType ?? 'regex-target';
     if (ruleType === 'font-target') {
       tf.rules.push({ id: foundry.utils.randomID(), type: 'font-target', fontSize: 'ALL', fontName: 'ALL' });
+    } else if (ruleType === 'format') {
+      tf.rules.push({
+        id: foundry.utils.randomID(), type: 'format', pattern: '',
+        group: 0,
+        lineBreakBefore: false, lineBreakAfter: false,
+        bold: false, italic: false, underline: false, indent: false, header: ''
+      });
     } else {
       tf.rules.push({ id: foundry.utils.randomID(), type: ruleType, pattern: '' });
     }
@@ -2099,8 +2125,10 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     if (event.target.closest('[data-action="deleteRule"]')) return;
     const id = target.closest('[data-rule-id]')?.dataset.ruleId;
     if (!id || id === this._selectedRuleId) return;
-    this._selectedRuleId = id;
-    this._scanData = null;
+    this._selectedRuleId  = id;
+    this._scanData        = null;
+    this._textScanData    = {};
+    this._textRegionFonts = {};
     this.#snapPlannerPage();
     this.render();
     await this.#runScan();
@@ -2512,7 +2540,18 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         if (!Array.isArray(data.rules)) throw new Error('Missing "rules" array.');
         const imported = data.rules.map(r => ({ ...makeDefaultRule(), ...r, id: foundry.utils.randomID() }));
         this._rules.push(...imported);
-        this._selectedRuleId = imported[0]?.id ?? this._selectedRuleId;
+        this._selectedRuleId  = imported[0]?.id ?? this._selectedRuleId;
+        this._scanData        = null;
+        this._textScanData    = {};
+        this._textRegionFonts = {};
+        // Snap planner page to the first valid page for the imported rule
+        // (inlined from #snapPlannerPage to avoid TS error inside arrow callback)
+        if (this._pdfPages) {
+          const validPages = parsePageString(this.selectedRule?.pages ?? '', this._pdfPages);
+          if (validPages.length && !validPages.includes(this._plannerPage)) {
+            this._plannerPage = validPages[0];
+          }
+        }
         ui.notifications.info(`Imported ${imported.length} rule(s) from "${file.name}".`);
         this.render();
       } catch (err) {

@@ -997,6 +997,10 @@ function _extractTextFieldValues(block, fields, boundaryField, catchAll, buildMa
 
     rawValue = _applyFieldStrips(rawValue, field.rules);
     entry[field.id] = rawValue;
+    if (rawValue) {
+      const htmlValue = applyFieldFormats(rawValue, field.rules);
+      if (htmlValue !== null) entry[field.id + '__html'] = htmlValue;
+    }
     if (field === boundaryField) entry._textName = rawValue;
   }
 
@@ -1008,4 +1012,70 @@ function _applyFieldStrips(text, rules) {
     try { text = text.replace(new RegExp(rule.pattern, 'gi'), '').trim(); } catch { /* skip */ }
   }
   return text.trim();
+}
+
+function escapeHtml(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/**
+ * Apply format rules to a plain-text field value, producing an HTML string.
+ * Each format rule targets a regex pattern and applies inline markup and/or
+ * line breaks to every match.
+ *
+ * Returns null when there are no format rules (signals: no HTML needed).
+ *
+ * @param {string}   text
+ * @param {Object[]} rules  field.rules array
+ * @returns {string|null}
+ */
+export function applyFieldFormats(text, rules) {
+  const fmtRules = (rules ?? []).filter(r => r.type === 'format' && r.pattern?.trim());
+  if (!fmtRules.length) return null;
+
+  // Start by HTML-escaping the plain text
+  let html = escapeHtml(text);
+
+  for (const rule of fmtRules) {
+    try {
+      const re       = new RegExp(rule.pattern, 'gi');
+      const groupIdx = Number(rule.group ?? 0);
+      html = html.replace(re, (...args) => {
+        // args: [match, ...captureGroups, offset, fullString]
+        const match  = args[0];
+        const groups = args.slice(1, -2); // capture groups only
+
+        // Determine target text (full match or a specific capture group)
+        let target = match;
+        let pre = '', post = '';
+        if (groupIdx > 0 && groups[groupIdx - 1] != null) {
+          target = String(groups[groupIdx - 1]);
+          const idx = match.indexOf(target);
+          if (idx >= 0) {
+            pre  = match.slice(0, idx);
+            post = match.slice(idx + target.length);
+          }
+        }
+
+        let result = target;
+        // Inline markup (innermost first so nesting order is predictable)
+        if (rule.underline) result = `<u>${result}</u>`;
+        if (rule.italic)    result = `<em>${result}</em>`;
+        if (rule.bold)      result = `<strong>${result}</strong>`;
+        // Block-level transforms
+        if (rule.indent)    result = `<span style="margin-left:1.5em">${result}</span>`;
+        if (rule.header)    result = `<${rule.header}>${result}</${rule.header}>`;
+        // Line breaks (outermost)
+        if (rule.lineBreakBefore) result = '<br>' + result;
+        if (rule.lineBreakAfter)  result = result + '<br>';
+        return pre + result + post;
+      });
+    } catch { /* invalid pattern — skip rule */ }
+  }
+
+  return html;
 }

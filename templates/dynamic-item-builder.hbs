@@ -498,7 +498,68 @@
                 </button>
               </div>
               {{#each this.rules}}
-              <div class="dib-text-rule-row" data-rule-id="{{this.id}}">
+              <div class="dib-text-rule-row{{#if (eq this.type "format")}} dib-format-rule-row{{/if}}" data-rule-id="{{this.id}}">
+                {{#if (eq this.type "format")}}
+                {{!-- Format rule: two-line layout (top: badge + pattern + controls; bottom: options) --}}
+                <div class="dib-format-rule-top">
+                  <span class="dib-text-rule-badge dib-text-rule-format">FMT</span>
+                  <input type="text" class="dib-text-rule-input"
+                         value="{{this.pattern}}"
+                         data-field-id="{{../id}}" data-rule-id="{{this.id}}"
+                         placeholder="Regex pattern to match…">
+                  <input type="number" class="dib-fmt-group-input"
+                         value="{{this.group}}" min="0" max="9" step="1"
+                         data-format-prop="group"
+                         title="Capture group to target (0 = full match)">
+                  <button class="dib-btn dib-btn-icon" data-action="moveTextFieldRule"
+                          data-dir="up" title="Move rule up">
+                    <i class="fas fa-chevron-up"></i>
+                  </button>
+                  <button class="dib-btn dib-btn-icon" data-action="moveTextFieldRule"
+                          data-dir="down" title="Move rule down">
+                    <i class="fas fa-chevron-down"></i>
+                  </button>
+                  <button class="dib-btn dib-btn-icon dib-btn-danger" data-action="deleteTextFieldRule"
+                          title="Remove rule">
+                    <i class="fas fa-times"></i>
+                  </button>
+                </div>
+                <div class="dib-format-options">
+                  <label class="dib-fmt-opt" title="Insert line break before matched text">
+                    <input type="checkbox" data-format-prop="lineBreakBefore" {{#if this.lineBreakBefore}}checked{{/if}}>
+                    <span>↵ Before</span>
+                  </label>
+                  <label class="dib-fmt-opt" title="Insert line break after matched text">
+                    <input type="checkbox" data-format-prop="lineBreakAfter" {{#if this.lineBreakAfter}}checked{{/if}}>
+                    <span>↵ After</span>
+                  </label>
+                  <label class="dib-fmt-opt" title="Bold">
+                    <input type="checkbox" data-format-prop="bold" {{#if this.bold}}checked{{/if}}>
+                    <strong>B</strong>
+                  </label>
+                  <label class="dib-fmt-opt" title="Italic">
+                    <input type="checkbox" data-format-prop="italic" {{#if this.italic}}checked{{/if}}>
+                    <em>I</em>
+                  </label>
+                  <label class="dib-fmt-opt" title="Underline">
+                    <input type="checkbox" data-format-prop="underline" {{#if this.underline}}checked{{/if}}>
+                    <u>U</u>
+                  </label>
+                  <label class="dib-fmt-opt" title="Indent matched text (adds 1.5em left margin)">
+                    <input type="checkbox" data-format-prop="indent" {{#if this.indent}}checked{{/if}}>
+                    <span>⇥ Indent</span>
+                  </label>
+                  <select class="dib-fmt-header-select" data-format-prop="header"
+                          title="Wrap matched text as a heading element">
+                    <option value="" {{#unless this.header}}selected{{/unless}}>Heading…</option>
+                    <option value="h1" {{#if (eq this.header "h1")}}selected{{/if}}>H1</option>
+                    <option value="h2" {{#if (eq this.header "h2")}}selected{{/if}}>H2</option>
+                    <option value="h3" {{#if (eq this.header "h3")}}selected{{/if}}>H3</option>
+                    <option value="h4" {{#if (eq this.header "h4")}}selected{{/if}}>H4</option>
+                  </select>
+                </div>
+                {{else}}
+                {{!-- Standard rules: single-row layout --}}
                 <span class="dib-text-rule-badge dib-text-rule-{{this.type}}">
                   {{#if (eq this.type "font-target")}}FONT{{else if (eq this.type "strip")}}STRIP{{else}}REGEX{{/if}}
                 </span>
@@ -537,6 +598,7 @@
                         title="Remove rule">
                   <i class="fas fa-times"></i>
                 </button>
+                {{/if}}
               </div>
               {{/each}}
               {{#unless this.isJoinTarget}}
@@ -556,6 +618,10 @@
                 <button class="dib-btn dib-btn-sm" data-action="addTextFieldRule"
                         data-rule-type="strip" title="Add a pattern to strip from this field's captured text">
                   <i class="fas fa-plus"></i> Strip
+                </button>
+                <button class="dib-btn dib-btn-sm" data-action="addTextFieldRule"
+                        data-rule-type="format" title="Add a formatting rule to apply HTML markup to matched text">
+                  <i class="fas fa-plus"></i> Format
                 </button>
               </div>
             </div>
@@ -673,7 +739,7 @@
                     <tr class="preview-tr" data-item-key="{{this._key}}">
                       <td class="dib-sel-cell" title="Click to select row"></td>
                       {{#each ../columns}}
-                      <td class="preview-td" data-field="{{this.field}}">{{getField .. this.field}}</td>
+                      <td class="preview-td" data-field="{{this.field}}">{{cellValue .. this.field}}</td>
                       {{/each}}
                     </tr>
                     {{/each}}

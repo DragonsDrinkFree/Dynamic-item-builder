@@ -1,9 +1,11 @@
-# v1.2.x
+# v1.2.0
 
 ## Major
 - Text field Scanning to create non-table Items / Join Table items.
+- Added formatting options to large text fields.
 
 ## Minor
+- Resolved bug where imported rules did not refresh the PDF page correctly.
 
 # V1.1.0
 
