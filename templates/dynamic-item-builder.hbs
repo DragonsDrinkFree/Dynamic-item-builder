@@ -585,6 +585,12 @@
                        value="{{this.pattern}}"
                        data-field-id="{{../id}}" data-rule-id="{{this.id}}"
                        placeholder="{{#if (eq this.type 'strip')}}Pattern to strip from result…{{else}}Regex to identify rows…{{/if}}">
+                {{#unless (eq this.type "strip")}}
+                <input type="number" class="dib-fmt-group-input"
+                       value="{{this.group}}" min="0" max="9" step="1"
+                       data-rule-prop="group"
+                       title="Capture group to use as value (0 = full match)">
+                {{/unless}}
                 {{/if}}
                 <button class="dib-btn dib-btn-icon" data-action="moveTextFieldRule"
                         data-dir="up" title="Move rule up">

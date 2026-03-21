@@ -969,18 +969,30 @@ function _extractTextFieldValues(block, fields, boundaryField, catchAll, buildMa
       // Extract only the regex-matched portion of the boundary row text.
       // Font-target rules select which rows are boundaries but don't trim text content.
       // Unmatched text after the regex match flows to subsequent fields.
+      // Rules are tried individually so each rule's group setting is respected.
       const firstRow  = block[0];
       const firstText = firstRow?.text ?? '';
-      const patterns  = (field.rules ?? [])
-        .filter(r => (r.type === 'regex-target' || r.type === 'target') && r.pattern?.trim())
-        .map(r => r.pattern.trim());
-      const re      = patterns.length ? safeRegexText(patterns.join('|'), 'i') : null;
-      const m       = re ? re.exec(firstText) : null;
-      rawValue      = m ? firstText.slice(m.index, m.index + m[0].length) : firstText;
-      const afterText = m ? firstText.slice(m.index + m[0].length).trim() : '';
-      remaining = afterText
-        ? [{ ...firstRow, text: afterText }, ...block.slice(1)]
-        : block.slice(1);
+      const targetRules = (field.rules ?? [])
+        .filter(r => (r.type === 'regex-target' || r.type === 'target') && r.pattern?.trim());
+      let matched  = null;
+      let groupIdx = 0;
+      for (const tr of targetRules) {
+        const re = safeRegexText(tr.pattern.trim(), 'i');
+        if (!re) continue;
+        const m = re.exec(firstText);
+        if (m) { matched = m; groupIdx = Number(tr.group ?? 0); break; }
+      }
+      if (matched) {
+        rawValue = groupIdx > 0 ? (matched[groupIdx] ?? matched[0] ?? '') : matched[0];
+        // afterText always follows the full match end regardless of group
+        const afterText = firstText.slice(matched.index + matched[0].length).trim();
+        remaining = afterText
+          ? [{ ...firstRow, text: afterText }, ...block.slice(1)]
+          : block.slice(1);
+      } else {
+        rawValue  = firstText;
+        remaining = block.slice(1);
+      }
     } else if (field === catchAll) {
       rawValue  = remaining.map(r => r.text).join(' ');
       remaining = [];
@@ -989,7 +1001,23 @@ function _extractTextFieldValues(block, fields, boundaryField, catchAll, buildMa
       if (matcher) {
         const claimed = remaining.filter(row => matcher(row));
         remaining     = remaining.filter(row => !matcher(row));
-        rawValue      = claimed.map(r => r.text).join(' ');
+        // If any target rule specifies a capture group, extract that group per row
+        const groupRules = (field.rules ?? []).filter(r =>
+          (r.type === 'regex-target' || r.type === 'target') && r.pattern?.trim() && Number(r.group ?? 0) > 0
+        );
+        if (groupRules.length) {
+          rawValue = claimed.map(r => {
+            for (const tr of groupRules) {
+              const re = safeRegexText(tr.pattern.trim(), 'i');
+              if (!re) continue;
+              const m = re.exec(r.text);
+              if (m) return m[Number(tr.group)] ?? r.text;
+            }
+            return r.text;
+          }).join(' ');
+        } else {
+          rawValue = claimed.map(r => r.text).join(' ');
+        }
       } else {
         rawValue = '';
       }

@@ -474,6 +474,14 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         return;
       }
 
+      // Regex-target / target rule: group number input
+      if (tr.type === 'regex-target' || tr.type === 'target') {
+        if (e.target.dataset.ruleProp !== 'group') return;
+        tr.group = Number(e.target.value);
+        this.#schedulePreview();
+        return;
+      }
+
       if (tr.type !== 'font-target') return;
 
       if (e.target.classList.contains('dib-font-size-select')) {
@@ -1395,7 +1403,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         bold: false, italic: false, underline: false, indent: false, header: ''
       });
     } else {
-      tf.rules.push({ id: foundry.utils.randomID(), type: ruleType, pattern: '' });
+      tf.rules.push({ id: foundry.utils.randomID(), type: ruleType, pattern: '', group: 0 });
     }
     this.render();
   }

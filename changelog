@@ -3,6 +3,8 @@
 ## Major
 - Text field Scanning to create non-table Items / Join Table items.
 - Added formatting options to large text fields.
+- added Regex grouping to field options
+- Added regex groups to formatting options.
 
 ## Minor
 - Resolved bug where imported rules did not refresh the PDF page correctly.
