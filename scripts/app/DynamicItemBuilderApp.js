@@ -7,12 +7,13 @@
  */
 
 import {
-  loadPDF, extractPages, parsePageString, mergePageItems,
-  detectTables, renderPageToCanvas, applyColumnMerges, applyColumnSplits,
+  loadPDF, extractPages, parsePageString, mergePageItems, filterItemsToRegion,
+  detectTables, renderPageToCanvas, applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits,
   parseDescriptionBlock, parseTextFields, extractRegionFonts, applyStripRules, normalizeItemName
 } from '../pdf-parser.js';
 import { applyRule }   from '../rule-engine.js';
 import { buildItems }  from '../item-builder.js';
+import { escapeRegex, escapeAttr } from '../utils.js';
 
 const { ApplicationV2, HandlebarsApplicationMixin } = foundry.applications.api;
 
@@ -1054,7 +1055,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       for (const region of textRegions) {
         const page = pages.find(p => p.pageNum === region.page);
         if (!page) continue;
-        const regionItems = this.#filterItemsToRegion(page, region);
+        const regionItems = filterItemsToRegion(page.items, region);
         if (!regionItems.length) continue;
 
         this._textRegionFonts[region.id] = extractRegionFonts(regionItems);
@@ -1080,7 +1081,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     }
 
     // Apply any manually-set column headers stored in the rule
-    this.#applyManualHeaders(rule);
+    applyManualHeaderOverrides(this._scanData?.tables, rule?.manualHeaders);
 
     // Apply any column merges defined for this rule
     this.#applyColumnMerges(rule);
@@ -1095,32 +1096,6 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     }
   }
 
-  #applyManualHeaders(rule) {
-    if (!this._scanData?.tables || !rule?.manualHeaders) return;
-    for (const table of this._scanData.tables) {
-      const override = rule.manualHeaders[table.id];
-      if (!override?.headers?.length) continue;
-      const { headers, originalHeaders } = override;
-
-      // Remap existing row cells from whatever they're currently named → new names (by index)
-      for (const row of table.rows) {
-        row.cells = row.cells.map((cell, i) => ({ ...cell, column: headers[i] ?? cell.column }));
-      }
-
-      // Prepend the originally-detected header row as the first data row
-      if (originalHeaders?.some(h => h)) {
-        table.rows.unshift({
-          cells:   headers.map((h, i) => ({ column: h, value: originalHeaders[i] ?? '' })),
-          rawText: originalHeaders.join(' '),
-          _injected: true
-        });
-      }
-
-      // Apply new column names
-      headers.forEach((h, i) => { if (table.columns[i]) table.columns[i].header = h; });
-    }
-  }
-
   #applyColumnMerges(rule) {
     if (!this._scanData?.tables || !rule?.columnMerges) return;
     applyColumnMerges(this._scanData.tables, rule.columnMerges);
@@ -1129,16 +1104,6 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
   #applyColumnSplits(rule) {
     if (!this._scanData?.tables || !rule?.columnSplits) return;
     applyColumnSplits(this._scanData.tables, rule.columnSplits);
-  }
-
-  /** Filter a single page's items to those inside a region bounding box. */
-  #filterItemsToRegion(page, region) {
-    return page.items.filter(item =>
-      item.x >= region.x            &&
-      item.x <= region.x + region.w &&
-      item.y >= region.y            &&
-      item.y <= region.y + region.h
-    );
   }
 
   /**
@@ -1155,7 +1120,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     for (const region of sorted) {
       const page = pages.find(p => p.pageNum === region.page);
       if (!page) continue;
-      const regionItems = this.#filterItemsToRegion(page, region);
+      const regionItems = filterItemsToRegion(page.items, region);
       for (const item of regionItems) {
         allItems.push({ ...item, y: item.y + yOffset });
       }
@@ -1515,14 +1480,14 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         icon: 'fa-ban',
         label: `Add to Skip Pattern: "${val}"`,
         action: () => {
-          rule.skipPattern = rule.skipPattern ? `${rule.skipPattern}|${_esc(val)}` : _esc(val);
+          rule.skipPattern = rule.skipPattern ? `${rule.skipPattern}|${escapeRegex(val)}` : escapeRegex(val);
           this.#schedulePreview(); this.render();
         }
       });
       menuItems.push({
         icon: 'fa-flag',
         label: `Set as Item Start Pattern`,
-        action: () => { rule.rowDetectionPattern = `^${_esc(val)}`; this.#schedulePreview(); this.render(); }
+        action: () => { rule.rowDetectionPattern = `^${escapeRegex(val)}`; this.#schedulePreview(); this.render(); }
       });
     }
     if (proseBlock) {
@@ -1531,7 +1496,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         icon: 'fa-flag',
         label: `Set as Item Start Pattern: "${text}…"`,
         action: () => {
-          rule.rowDetectionPattern = _esc(proseBlock.dataset.text.split(' ')[0]);
+          rule.rowDetectionPattern = escapeRegex(proseBlock.dataset.text.split(' ')[0]);
           this.#schedulePreview(); this.render();
         }
       });
@@ -1562,10 +1527,9 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     // Current user-defined names (or column numbers if first time)
     const currentHeaders  = existing?.headers ?? table.columns.map((_, i) => `Col ${i + 1}`);
 
-    const esc = s => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
     const inputsHtml = table.columns.map((_, i) => {
-      const orig = esc(originalHeaders[i] ?? `Col ${i + 1}`);
-      const cur  = esc(currentHeaders[i]  ?? '');
+      const orig = escapeAttr(originalHeaders[i] ?? `Col ${i + 1}`);
+      const cur  = escapeAttr(currentHeaders[i]  ?? '');
       return `<div class="dib-hpop-col">
         <label class="dib-hpop-label" title="Original: ${orig}">${orig}</label>
         <input type="text" class="dib-cpop-input dib-hpop-input" data-col-idx="${i}"
@@ -1643,15 +1607,14 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     if (!rule || !tableId || !col) return;
 
     const existing  = rule.columnSplits?.[tableId]?.[col] ?? '';
-    const esc       = s => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 
     const popover = document.createElement('div');
     popover.className = 'dib-cell-popover dib-split-popover';
     popover.innerHTML = `
-      <div class="dib-cpop-label">Split Column <em style="font-weight:400;font-size:10px;text-transform:none">"${esc(col)}"</em></div>
+      <div class="dib-cpop-label">Split Column <em style="font-weight:400;font-size:10px;text-transform:none">"${escapeAttr(col)}"</em></div>
       <div class="dib-hpop-col" style="margin-bottom:6px">
         <label class="dib-hpop-label">Split on symbol</label>
-        <input type="text" class="dib-cpop-input dib-split-input" value="${esc(existing)}"
+        <input type="text" class="dib-cpop-input dib-split-input" value="${escapeAttr(existing)}"
                placeholder="e.g. /" style="width:80px;text-align:center;font-size:14px">
         <span style="font-size:10px;color:#888;margin-top:3px;display:block">
           Max sub-columns determined from data. Short rows duplicate their last value.
@@ -1969,7 +1932,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
     const existing  = this._cellOverrides[ruleId]?.[dibKey]?.[field];
     const startVal  = existing !== undefined ? existing : td.textContent.trim();
-    const safeVal   = String(startVal).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+    const safeVal   = escapeAttr(startVal);
 
     const popover = document.createElement('div');
     popover.className = 'dib-cell-popover';
@@ -2605,10 +2568,6 @@ async function getItemAttributePaths(itemType) {
 // -------------------------------------------------------------------------
 // Default factories
 // -------------------------------------------------------------------------
-
-function _esc(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 function makeDefaultRule() {
   return {

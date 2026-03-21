@@ -3,7 +3,8 @@
  * an array of detected items: [{ name, [foundryField]: value, ... }]
  */
 
-import { extractPages, parsePageString, mergePageItems, groupIntoRows, detectColumns, mapRowsToCells, detectTables, applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits, parseDescriptionBlock, parseTextFields, applyStripRules, normalizeItemName } from './pdf-parser.js';
+import { extractPages, parsePageString, mergePageItems, filterItemsToRegion, groupIntoRows, detectColumns, mapRowsToCells, detectTables, applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits, parseDescriptionBlock, parseTextFields, applyStripRules, normalizeItemName } from './pdf-parser.js';
+import { safeRegex, setNestedValue } from './utils.js';
 
 /**
  * Apply a rule to a loaded PDF document.
@@ -47,12 +48,7 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
   for (const region of sorted) {
     const page = pages.find(p => p.pageNum === region.page);
     if (!page) continue;
-    const regionItems = page.items.filter(item =>
-      item.x >= region.x            &&
-      item.x <= region.x + region.w &&
-      item.y >= region.y            &&
-      item.y <= region.y + region.h
-    );
+    const regionItems = filterItemsToRegion(page.items, region);
     for (const item of regionItems) {
       allItems.push({ ...item, y: item.y + yOffset });
     }
@@ -80,12 +76,7 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
     const page = pages.find(p => p.pageNum === region.page);
     if (!page) continue;
 
-    const regionItems = page.items.filter(item =>
-      item.x >= region.x            &&
-      item.x <= region.x + region.w &&
-      item.y >= region.y            &&
-      item.y <= region.y + region.h
-    );
+    const regionItems = filterItemsToRegion(page.items, region);
     if (!regionItems.length) continue;
 
     let entries;
@@ -367,14 +358,6 @@ function extractAttributes(context, attributeRules, rule) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function safeRegex(pattern, flags = '') {
-  try {
-    return new RegExp(pattern, flags);
-  } catch {
-    return null;
-  }
-}
-
 function applyTransform(value, transform) {
   switch (transform) {
     case 'number':    return isNaN(Number(value)) ? 0 : Number(value);
@@ -386,12 +369,3 @@ function applyTransform(value, transform) {
   }
 }
 
-function setNestedValue(obj, path, value) {
-  const parts = path.split('.');
-  let cur = obj;
-  for (let i = 0; i < parts.length - 1; i++) {
-    if (!(parts[i] in cur) || typeof cur[parts[i]] !== 'object') cur[parts[i]] = {};
-    cur = cur[parts[i]];
-  }
-  cur[parts[parts.length - 1]] = value;
-}
