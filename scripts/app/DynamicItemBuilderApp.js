@@ -10,7 +10,7 @@ import {
   loadPDF, extractPages, parsePageString, mergePageItems, filterItemsToRegion,
   collectTableRegionItems, detectTables, renderPageToCanvas,
   applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits,
-  parseTextRegion, extractRegionFonts, normalizeItemName
+  parseTextRegion, extractRegionFonts
 } from '../pdf-parser.js';
 import { applyRule }   from '../rule-engine.js';
 import { buildItems }  from '../item-builder.js';
@@ -20,8 +20,8 @@ import { computeSuggestionsForRule, enrichScanDataColumns } from './suggestions.
 import { getSystemItemTypes, getItemAttributePaths, makeDefaultRule, makeDefaultAttribute, TRANSFORMS } from './factories.js';
 import { showSetHeadersPopover as _showSetHeadersPopover, showSplitColumnPopover as _showSplitColumnPopover, showCellEditPopover as _showCellEditPopover, showMultiCellEditPopover as _showMultiCellEditPopover } from './popovers.js';
 import { applyCellSelClasses, applyTestErrorClasses, applyOverrideClasses, bulkTransformColumn } from './cell-operations.js';
-import { buildPreviewSummary, buildAttributeList } from './prepare-context.js';
-import { getPdfCoords, createRegionData, buildRegionOverlay } from './planner.js';
+import { buildPreviewSummary, buildAttributeList, enrichTextEntries, aggregateTextFonts } from './prepare-context.js';
+import { getPdfCoords, createRegionData, buildRegionOverlay, computeAutoRegions } from './planner.js';
 import { validateItems } from './validation.js';
 
 const { ApplicationV2, HandlebarsApplicationMixin } = foundry.applications.api;
@@ -495,7 +495,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       const itemKey = rowEl?.dataset.itemKey;
       const field   = td.dataset.field;
       if (!ruleId || !itemKey || !field) return;
-      const dibKey = itemKey.substring(ruleId.length + 2);
+      const dibKey = this.#parseDibKey(itemKey, ruleId);
 
       if (e.shiftKey && this._lastCellKey
           && this._cellSelField === field && this._cellSelRuleId === ruleId) {
@@ -529,7 +529,8 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
             if (!overTd || overTd.dataset.field !== field) return;
             const overRuleEl = overTd.closest('[data-rule-id]');
             if (overRuleEl?.dataset.ruleId !== ruleId) return;
-            const overKey = overTd.closest('[data-item-key]')?.dataset.itemKey?.substring(ruleId.length + 2);
+            const overItemKey = overTd.closest('[data-item-key]')?.dataset.itemKey;
+            const overKey = overItemKey ? this.#parseDibKey(overItemKey, ruleId) : null;
             if (!overKey) return;
             this.#cellRangeSelect(ruleId, field, startDibKey, overKey);
             this._wasCellDrag = true;
@@ -868,6 +869,12 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     this._debounceTimer = setTimeout(() => this.#runPreview(), 900);
   }
 
+  /** Schedule a debounced preview AND immediately re-render the UI. */
+  #schedulePreviewAndRender() {
+    this.#schedulePreview();
+    this.render();
+  }
+
   async #runPreview() {
     if (!this._pdf) return;
     this._testErrors = {};   // stale test results no longer valid after a re-scan
@@ -896,12 +903,29 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
   // PDF Scan — region-based or auto-detect fallback
   // -------------------------------------------------------------------------
 
+  #clearScanState() {
+    this._scanData        = null;
+    this._textScanData    = {};
+    this._textRegionFonts = {};
+  }
+
+  /** Extract the dibKey portion from a composite itemKey ('ruleId::dibKey'). */
+  #parseDibKey(itemKey, ruleId) {
+    return itemKey.substring(ruleId.length + 2);
+  }
+
+  /** Set a cell override value and clear any related test error. */
+  #setCellOverride(ruleId, dibKey, field, value) {
+    if (!this._cellOverrides[ruleId])         this._cellOverrides[ruleId] = {};
+    if (!this._cellOverrides[ruleId][dibKey]) this._cellOverrides[ruleId][dibKey] = {};
+    this._cellOverrides[ruleId][dibKey][field] = value;
+    this.#clearTestError(ruleId, dibKey, field);
+  }
+
   async #runScan() {
     const rule = this.selectedRule;
     if (!this._pdf || !rule?.pages) {
-      this._scanData        = null;
-      this._textScanData    = {};
-      this._textRegionFonts = {};
+      this.#clearScanState();
       return;
     }
 
@@ -933,33 +957,23 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       }
     } catch (err) {
       console.warn('Dynamic Item Builder | Scan error:', err);
-      this._scanData = null;
+      this.#clearScanState();
     }
 
     // Apply any manually-set column headers stored in the rule
     applyManualHeaderOverrides(this._scanData?.tables, rule?.manualHeaders);
 
-    // Apply any column merges defined for this rule
-    this.#applyColumnMerges(rule);
-
-    // Apply any column splits defined for this rule
-    this.#applyColumnSplits(rule);
+    // Apply column merges and splits defined for this rule
+    if (this._scanData?.tables) {
+      if (rule?.columnMerges) applyColumnMerges(this._scanData.tables, rule.columnMerges);
+      if (rule?.columnSplits) applyColumnSplits(this._scanData.tables, rule.columnSplits);
+    }
 
     // Auto-populate headerPattern from the first labeled column if not already set
     if (rule && !rule.headerPattern?.trim() && this._scanData?.tables?.[0]?.columns?.length) {
       const firstHeader = this._scanData.tables[0].columns.find(c => c.header)?.header;
       if (firstHeader) rule.headerPattern = firstHeader;
     }
-  }
-
-  #applyColumnMerges(rule) {
-    if (!this._scanData?.tables || !rule?.columnMerges) return;
-    applyColumnMerges(this._scanData.tables, rule.columnMerges);
-  }
-
-  #applyColumnSplits(rule) {
-    if (!this._scanData?.tables || !rule?.columnSplits) return;
-    applyColumnSplits(this._scanData.tables, rule.columnSplits);
   }
 
   /**
@@ -1003,47 +1017,8 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       ];
     }
 
-    // Determine whether we have a table to match against
-    const hasTables = (this._scanData?.tables?.length ?? 0) > 0;
-    const joinField = textFields?.find(f => f.isJoinTarget);
-
-    const enrichedEntries = allEntries.map(entry => {
-      let matchStatus = 'unlinked';
-      const canMatch = hasTables && (joinField || nameAttr);
-      if (canMatch) {
-        const normEntry = normalizeItemName(entry._textName ?? '');
-        let found = false;
-        for (const table of (this._scanData?.tables ?? [])) {
-          for (const row of table.rows) {
-            if (row._injected || row._sectionHeader) continue;
-            const nameCell = nameAttr
-              ? row.cells.find(c => c.column === nameAttr.columnHeader)
-              : row.cells[0];
-            if (!nameCell) continue;
-            const normRow = normalizeItemName(nameCell.value);
-            if (normRow === normEntry || normRow.includes(normEntry) || normEntry.includes(normRow)) {
-              found = true; break;
-            }
-          }
-          if (found) break;
-        }
-        matchStatus = found ? 'matched' : 'unmatched';
-      }
-      const _cols = columns.map(c => ({ id: c.id, header: c.header, isJoinTarget: c.isJoinTarget, value: entry[c.id] ?? '' }));
-      return { ...entry, _matchStatus: matchStatus, _cols };
-    });
-
-    // Aggregate unique fonts across all text regions for the field rule dropdowns
-    const fontSet = new Map();
-    for (const region of textRegions) {
-      for (const f of (this._textRegionFonts[region.id] ?? [])) {
-        const key = `${f.fontSize}::${f.fontName}`;
-        if (!fontSet.has(key)) fontSet.set(key, f);
-      }
-    }
-    const availableFonts     = [...fontSet.values()].sort((a, b) => b.fontSize - a.fontSize || a.fontName.localeCompare(b.fontName));
-    const availableFontSizes = [...new Set(availableFonts.map(f => String(f.fontSize)))];
-    const availableFontNames = [...new Set(availableFonts.map(f => f.fontName))];
+    const enrichedEntries = enrichTextEntries(allEntries, columns, this._scanData, nameAttr);
+    const { availableFonts, availableFontSizes, availableFontNames } = aggregateTextFonts(this._textRegionFonts, textRegions);
 
     return {
       columns,
@@ -1076,7 +1051,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       menuItems.push({
         icon: 'fa-unlink',
         label: 'Remove Join Target',
-        action: () => { tf.isJoinTarget = false; this.#schedulePreview(); this.render(); }
+        action: () => { tf.isJoinTarget = false; this.#schedulePreviewAndRender(); }
       });
     } else {
       menuItems.push({
@@ -1099,7 +1074,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       for (const attr of this._cachedAttributePaths) {
         menuItems.push({
           icon: 'fa-database', label: attr.path, filterable: true,
-          action: () => { tf.foundryAttr = attr.path; this.#schedulePreview(); this.render(); }
+          action: () => { tf.foundryAttr = attr.path; this.#schedulePreviewAndRender(); }
         });
       }
       if (tf.foundryAttr) {
@@ -1250,7 +1225,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       menuItems.push({
         icon: 'fa-heading',
         label: `Set Header Pattern: "${col}"`,
-        action: () => { rule.headerPattern = col; this.#schedulePreview(); this.render(); }
+        action: () => { rule.headerPattern = col; this.#schedulePreviewAndRender(); }
       });
       const hasSplit = rule.columnSplits?.[tableId]?.[col];
       menuItems.push({
@@ -1308,13 +1283,13 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         label: `Add to Skip Pattern: "${val}"`,
         action: () => {
           rule.skipPattern = rule.skipPattern ? `${rule.skipPattern}|${escapeRegex(val)}` : escapeRegex(val);
-          this.#schedulePreview(); this.render();
+          this.#schedulePreviewAndRender();
         }
       });
       menuItems.push({
         icon: 'fa-flag',
         label: `Set as Item Start Pattern`,
-        action: () => { rule.rowDetectionPattern = `^${escapeRegex(val)}`; this.#schedulePreview(); this.render(); }
+        action: () => { rule.rowDetectionPattern = `^${escapeRegex(val)}`; this.#schedulePreviewAndRender(); }
       });
     }
     if (proseBlock) {
@@ -1324,7 +1299,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         label: `Set as Item Start Pattern: "${text}…"`,
         action: () => {
           rule.rowDetectionPattern = escapeRegex(proseBlock.dataset.text.split(' ')[0]);
-          this.#schedulePreview(); this.render();
+          this.#schedulePreviewAndRender();
         }
       });
     }
@@ -1410,7 +1385,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     const ruleEl  = this.element?.querySelector(`.preview-rule[data-rule-id="${CSS.escape(ruleId)}"]`);
     if (!ruleEl) return;
     const allRows = [...ruleEl.querySelectorAll('.preview-tr[data-item-key]')];
-    const keys    = allRows.map(r => r.dataset.itemKey.substring(ruleId.length + 2));
+    const keys    = allRows.map(r => this.#parseDibKey(r.dataset.itemKey, ruleId));
     const fromIdx = keys.indexOf(fromDibKey);
     const toIdx   = keys.indexOf(toDibKey);
     if (fromIdx < 0 || toIdx < 0) return;
@@ -1427,10 +1402,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
   #showMultiCellEditPopover(anchorTd, ruleId, field) {
     _showMultiCellEditPopover(anchorTd, this._cellSel.length, field.split('.').pop(), (val) => {
       for (const { ruleId: rid, dibKey, field: f } of this._cellSel) {
-        if (!this._cellOverrides[rid])         this._cellOverrides[rid] = {};
-        if (!this._cellOverrides[rid][dibKey]) this._cellOverrides[rid][dibKey] = {};
-        this._cellOverrides[rid][dibKey][f] = val;
-        this.#clearTestError(rid, dibKey, f);
+        this.#setCellOverride(rid, dibKey, f, val);
       }
       this.render();
     });
@@ -1501,7 +1473,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     const field   = td.dataset.field;
     if (!ruleId || !itemKey || !field) return;
 
-    const dibKey      = itemKey.substring(ruleId.length + 2);
+    const dibKey      = this.#parseDibKey(itemKey, ruleId);
     const hasOverride = this._cellOverrides[ruleId]?.[dibKey]?.[field] !== undefined;
     const inMultiSel  = this._cellSel.length > 1
       && this._cellSelField === field
@@ -1561,10 +1533,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     const startVal = existing !== undefined ? existing : td.textContent.trim();
 
     _showCellEditPopover(td, field.split('.').pop(), startVal, (val) => {
-      if (!this._cellOverrides[ruleId])         this._cellOverrides[ruleId] = {};
-      if (!this._cellOverrides[ruleId][dibKey]) this._cellOverrides[ruleId][dibKey] = {};
-      this._cellOverrides[ruleId][dibKey][field] = val;
-      this.#clearTestError(ruleId, dibKey, field);
+      this.#setCellOverride(ruleId, dibKey, field, val);
       this.render();
     });
   }
@@ -1606,9 +1575,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     const id = target.closest('[data-rule-id]')?.dataset.ruleId;
     if (!id || id === this._selectedRuleId) return;
     this._selectedRuleId  = id;
-    this._scanData        = null;
-    this._textScanData    = {};
-    this._textRegionFonts = {};
+    this.#clearScanState();
     this.#snapPlannerPage();
     this.render();
     await this.#runScan();
@@ -1660,47 +1627,18 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       return;
     }
     try {
-      const { extractPages, parsePageString, mergePageItems, detectTables } =
-        await import('../pdf-parser.js');
       const pageNums = parsePageString(rule.pages, this._pdf.numPages);
       const pages    = await extractPages(this._pdf, pageNums);
       const allItems = mergePageItems(pages);
       const result   = detectTables(allItems);
 
       rule.regions ??= [];
-      let added = 0;
+      const existingCount = rule.regions.filter(r => r.type === 'table').length;
+      const newRegions = computeAutoRegions(result.tables, allItems, pageNums, existingCount);
+      rule.regions.push(...newRegions);
 
-      for (const table of result.tables) {
-        // Compute bounding box of all items in this table
-        const tableItems = allItems.filter(item =>
-          table.rows.some(row => row.cells.some(c => c.value && item.text.includes(c.value)))
-        );
-        if (!tableItems.length) continue;
-
-        const xs = tableItems.map(i => i.x);
-        const ys = tableItems.map(i => i.y);
-        const x  = Math.min(...xs) - 5;
-        const y  = Math.min(...ys) - 5;
-        const w  = Math.max(...tableItems.map(i => i.x + (i.width ?? 0))) - x + 5;
-        const h  = Math.max(...ys) - y + 20;
-
-        // Determine which page this table is on (use page of first item)
-        const firstItem = tableItems[0];
-        const page      = firstItem?.page ?? pageNums[0];
-
-        const count = rule.regions.filter(r => r.type === 'table').length + 1 + added;
-        rule.regions.push({
-          id: foundry.utils.randomID(),
-          type: 'table', group: `table-${count}`,
-          page, x: Math.round(x), y: Math.round(y),
-          w: Math.round(w), h: Math.round(h),
-          label: `Table ${count}`
-        });
-        added++;
-      }
-
-      if (added) {
-        ui.notifications.info(`Auto-detected ${added} table region(s).`);
+      if (newRegions.length) {
+        ui.notifications.info(`Auto-detected ${newRegions.length} table region(s).`);
         this.render();
       } else {
         ui.notifications.warn('No tables detected. Try drawing regions manually.');
@@ -1749,8 +1687,6 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     }
     this.render();
   }
-
-  // ── Suggested Links actions ──────────────────────────────────────────────
 
   // ── Attribute mapping actions ────────────────────────────────────────────
 
@@ -1827,7 +1763,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         added++;
       }
     }
-    if (added > 0) { this.#schedulePreview(); this.render(); }
+    if (added > 0) { this.#schedulePreviewAndRender(); }
   }
 
   async #showAttributeDialog(foundryField) {
@@ -1956,17 +1892,8 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         const imported = data.rules.map(r => ({ ...makeDefaultRule(), ...r, id: foundry.utils.randomID() }));
         this._rules.push(...imported);
         this._selectedRuleId  = imported[0]?.id ?? this._selectedRuleId;
-        this._scanData        = null;
-        this._textScanData    = {};
-        this._textRegionFonts = {};
-        // Snap planner page to the first valid page for the imported rule
-        // (inlined from #snapPlannerPage to avoid TS error inside arrow callback)
-        if (this._pdfPages) {
-          const validPages = parsePageString(this.selectedRule?.pages ?? '', this._pdfPages);
-          if (validPages.length && !validPages.includes(this._plannerPage)) {
-            this._plannerPage = validPages[0];
-          }
-        }
+        this.#clearScanState();
+        this.#snapPlannerPage();
         ui.notifications.info(`Imported ${imported.length} rule(s) from "${file.name}".`);
         this.render();
       } catch (err) {
