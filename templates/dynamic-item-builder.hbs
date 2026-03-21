@@ -150,6 +150,9 @@
           {{#if tableRegionCount}}
           <span class="dib-tab-badge">{{tableRegionCount}}T</span>
           {{/if}}
+          {{#if textRegionCount}}
+          <span class="dib-tab-badge dib-tab-badge-text">{{textRegionCount}}X</span>
+          {{/if}}
         </button>
         <button class="dib-tab {{#if itemPlannerTabActive}}active{{/if}}" data-center-tab="item-planner">
           <i class="fas fa-list-ul"></i>
@@ -179,6 +182,10 @@
             <button class="dib-btn dib-draw-btn {{#if (eq drawMode "table")}}active{{/if}}"
                     data-draw-mode="table" title="Draw table region">
               <i class="fas fa-table"></i> Table Region
+            </button>
+            <button class="dib-btn dib-draw-btn dib-draw-btn-text {{#if (eq drawMode "text")}}active{{/if}}"
+                    data-draw-mode="text" title="Draw text region for descriptive text or structured entries">
+              <i class="fas fa-align-left"></i> Text Region
             </button>
           </div>
 
@@ -218,13 +225,6 @@
                 </div>
                 <div class="dib-region-item-meta">
                   <span class="dib-region-page-tag">p.{{this.page}}</span>
-                  <input class="dib-region-group-input"
-                         type="text"
-                         placeholder="group"
-                         value="{{this.group}}"
-                         data-region-field="group"
-                         data-region-id="{{this.id}}"
-                         title="Regions in the same group are collated together">
                   <button class="dib-btn dib-btn-icon dib-btn-danger dib-region-del-btn"
                           data-action="deleteRegion"
                           data-region-id="{{this.id}}"
@@ -365,6 +365,15 @@
           <span class="dib-loading"><i class="fas fa-spinner fa-spin"></i></span>
           {{/if}}
         </button>
+        {{#if hasTextRegions}}
+        <button class="dib-tab dib-tab-text {{#if textTabActive}}active{{/if}}" data-tab="text">
+          <i class="fas fa-align-left"></i>
+          <span>Text Preview</span>
+          {{#if textRegionCount}}
+          <span class="dib-tab-badge dib-tab-badge-text">{{textRegionCount}}</span>
+          {{/if}}
+        </button>
+        {{/if}}
         <button class="dib-tab {{#if previewTabActive}}active{{/if}} {{#if previewHasContent}}dib-tab-has-preview{{/if}}" data-tab="preview">
           <i class="fas fa-eye"></i>
           <span>Items Preview</span>
@@ -382,7 +391,6 @@
             {{#each scanData.tables}}
             <div class="scan-table-wrap">
               <div class="scan-table-label">
-                <i class="fas fa-table"></i> Table {{@index}}
                 <span class="scan-col-count">
                   {{this.columns.length}} columns · {{this.rows.length}} rows
                 </span>
@@ -450,6 +458,249 @@
         </div>
       </div>
 
+      {{!-- ── TEXT PREVIEW ── --}}
+      <div class="dib-tab-panel {{#if textTabActive}}active{{/if}}" id="dib-tab-text">
+        <div class="dib-text-preview">
+
+          {{!-- Field Rules --}}
+          <div class="dib-field-rules-section" data-fonts="{{textFontsJson}}">
+            <div class="dib-field-rules-header">
+              <button class="dib-btn dib-btn-sm" data-action="refreshPreview"
+                      title="Apply field rules and refresh text preview">
+                <i class="fas fa-sync-alt"></i> Refresh
+              </button>
+              <span class="dib-field-rules-title"><i class="fas fa-layer-group"></i> Field Rules</span>
+              <button class="dib-btn dib-btn-sm" data-action="addTextField"
+                      title="Add a new field to extract from this text region">
+                <i class="fas fa-plus"></i> Add Field
+              </button>
+            </div>
+
+
+            {{#each selectedRule.textFields}}
+            <div class="dib-text-field-block{{#if this.isJoinTarget}} dib-field-join-target{{/if}}" data-field-id="{{this.id}}">
+              <div class="dib-text-field-header">
+                <input type="text" class="dib-text-field-header-input"
+                       data-field-id="{{this.id}}" data-field-prop="header"
+                       value="{{this.header}}" placeholder="Field label…">
+                {{#if this.foundryAttr}}<span class="dib-text-field-attr-badge" title="Mapped to: {{this.foundryAttr}}">→ {{this.foundryAttr}}</span>{{/if}}
+                <button class="dib-btn dib-btn-icon" data-action="moveTextField"
+                        data-dir="up" title="Move field up">
+                  <i class="fas fa-chevron-up"></i>
+                </button>
+                <button class="dib-btn dib-btn-icon" data-action="moveTextField"
+                        data-dir="down" title="Move field down">
+                  <i class="fas fa-chevron-down"></i>
+                </button>
+                <button class="dib-btn dib-btn-icon dib-btn-danger" data-action="deleteTextField"
+                        title="Remove field">
+                  <i class="fas fa-times"></i>
+                </button>
+              </div>
+              {{#each this.rules}}
+              <div class="dib-text-rule-row{{#if (eq this.type "format")}} dib-format-rule-row{{/if}}" data-rule-id="{{this.id}}">
+                {{#if (eq this.type "format")}}
+                {{!-- Format rule: two-line layout (top: badge + pattern + controls; bottom: options) --}}
+                <div class="dib-format-rule-top">
+                  <span class="dib-text-rule-badge dib-text-rule-format">FMT</span>
+                  <input type="text" class="dib-text-rule-input"
+                         value="{{this.pattern}}"
+                         data-field-id="{{../id}}" data-rule-id="{{this.id}}"
+                         placeholder="Regex pattern to match…">
+                  <input type="number" class="dib-fmt-group-input"
+                         value="{{this.group}}" min="0" max="9" step="1"
+                         data-format-prop="group"
+                         title="Capture group to target (0 = full match)">
+                  <button class="dib-btn dib-btn-icon" data-action="moveTextFieldRule"
+                          data-dir="up" title="Move rule up">
+                    <i class="fas fa-chevron-up"></i>
+                  </button>
+                  <button class="dib-btn dib-btn-icon" data-action="moveTextFieldRule"
+                          data-dir="down" title="Move rule down">
+                    <i class="fas fa-chevron-down"></i>
+                  </button>
+                  <button class="dib-btn dib-btn-icon dib-btn-danger" data-action="deleteTextFieldRule"
+                          title="Remove rule">
+                    <i class="fas fa-times"></i>
+                  </button>
+                </div>
+                <div class="dib-format-options">
+                  <label class="dib-fmt-opt" title="Insert line break before matched text">
+                    <input type="checkbox" data-format-prop="lineBreakBefore" {{#if this.lineBreakBefore}}checked{{/if}}>
+                    <span>↵ Before</span>
+                  </label>
+                  <label class="dib-fmt-opt" title="Insert line break after matched text">
+                    <input type="checkbox" data-format-prop="lineBreakAfter" {{#if this.lineBreakAfter}}checked{{/if}}>
+                    <span>↵ After</span>
+                  </label>
+                  <label class="dib-fmt-opt" title="Bold">
+                    <input type="checkbox" data-format-prop="bold" {{#if this.bold}}checked{{/if}}>
+                    <strong>B</strong>
+                  </label>
+                  <label class="dib-fmt-opt" title="Italic">
+                    <input type="checkbox" data-format-prop="italic" {{#if this.italic}}checked{{/if}}>
+                    <em>I</em>
+                  </label>
+                  <label class="dib-fmt-opt" title="Underline">
+                    <input type="checkbox" data-format-prop="underline" {{#if this.underline}}checked{{/if}}>
+                    <u>U</u>
+                  </label>
+                  <label class="dib-fmt-opt" title="Indent matched text (adds 1.5em left margin)">
+                    <input type="checkbox" data-format-prop="indent" {{#if this.indent}}checked{{/if}}>
+                    <span>⇥ Indent</span>
+                  </label>
+                  <select class="dib-fmt-header-select" data-format-prop="header"
+                          title="Wrap matched text as a heading element">
+                    <option value="" {{#unless this.header}}selected{{/unless}}>Heading…</option>
+                    <option value="h1" {{#if (eq this.header "h1")}}selected{{/if}}>H1</option>
+                    <option value="h2" {{#if (eq this.header "h2")}}selected{{/if}}>H2</option>
+                    <option value="h3" {{#if (eq this.header "h3")}}selected{{/if}}>H3</option>
+                    <option value="h4" {{#if (eq this.header "h4")}}selected{{/if}}>H4</option>
+                  </select>
+                </div>
+                {{else}}
+                {{!-- Standard rules: single-row layout --}}
+                <span class="dib-text-rule-badge dib-text-rule-{{this.type}}">
+                  {{#if (eq this.type "font-target")}}FONT{{else if (eq this.type "strip")}}STRIP{{else}}REGEX{{/if}}
+                </span>
+                {{#if (eq this.type "font-target")}}
+                <select class="dib-font-select dib-font-size-select"
+                        data-field-id="{{../id}}" data-rule-id="{{this.id}}"
+                        title="Filter by font size (ALL = any size)">
+                  <option value="ALL" {{#if (eq this.fontSize "ALL")}}selected{{/if}}>ALL sizes</option>
+                  {{#each @root.textScanContext.availableFontSizes}}
+                  <option value="{{this}}" {{#if (eq this ../fontSize)}}selected{{/if}}>{{this}}pt</option>
+                  {{/each}}
+                </select>
+                <select class="dib-font-select dib-font-name-select"
+                        data-field-id="{{../id}}" data-rule-id="{{this.id}}"
+                        title="Filter by font name (ALL = any font)">
+                  <option value="ALL" {{#if (eq this.fontName "ALL")}}selected{{/if}}>ALL fonts</option>
+                  {{#each @root.textScanContext.availableFontNames}}
+                  <option value="{{this}}" {{#if (eq this ../fontName)}}selected{{/if}}>{{this}}</option>
+                  {{/each}}
+                </select>
+                {{else}}
+                <input type="text" class="dib-text-rule-input"
+                       value="{{this.pattern}}"
+                       data-field-id="{{../id}}" data-rule-id="{{this.id}}"
+                       placeholder="{{#if (eq this.type 'strip')}}Pattern to strip from result…{{else}}Regex to identify rows…{{/if}}">
+                {{#unless (eq this.type "strip")}}
+                <input type="number" class="dib-fmt-group-input"
+                       value="{{this.group}}" min="0" max="9" step="1"
+                       data-rule-prop="group"
+                       title="Capture group to use as value (0 = full match)">
+                {{/unless}}
+                {{/if}}
+                <button class="dib-btn dib-btn-icon" data-action="moveTextFieldRule"
+                        data-dir="up" title="Move rule up">
+                  <i class="fas fa-chevron-up"></i>
+                </button>
+                <button class="dib-btn dib-btn-icon" data-action="moveTextFieldRule"
+                        data-dir="down" title="Move rule down">
+                  <i class="fas fa-chevron-down"></i>
+                </button>
+                <button class="dib-btn dib-btn-icon dib-btn-danger" data-action="deleteTextFieldRule"
+                        title="Remove rule">
+                  <i class="fas fa-times"></i>
+                </button>
+                {{/if}}
+              </div>
+              {{/each}}
+              {{#unless this.isJoinTarget}}
+              {{#unless this.rules.length}}
+              <p class="dib-text-rules-empty dib-field-catchall-note">No target rules — catch-all (receives all unclaimed text).</p>
+              {{/unless}}
+              {{/unless}}
+              <div class="dib-text-field-rule-adder">
+                <button class="dib-btn dib-btn-sm" data-action="addTextFieldRule"
+                        data-rule-type="regex-target" title="Add a regex pattern to identify which rows belong to this field">
+                  <i class="fas fa-plus"></i> Regex Target
+                </button>
+                <button class="dib-btn dib-btn-sm" data-action="addTextFieldRule"
+                        data-rule-type="font-target" title="Add a font filter to identify which rows belong to this field">
+                  <i class="fas fa-plus"></i> Font Target
+                </button>
+                <button class="dib-btn dib-btn-sm" data-action="addTextFieldRule"
+                        data-rule-type="strip" title="Add a pattern to strip from this field's captured text">
+                  <i class="fas fa-plus"></i> Strip
+                </button>
+                <button class="dib-btn dib-btn-sm" data-action="addTextFieldRule"
+                        data-rule-type="format" title="Add a formatting rule to apply HTML markup to matched text">
+                  <i class="fas fa-plus"></i> Format
+                </button>
+              </div>
+            </div>
+            {{/each}}
+
+            {{#unless selectedRule.textFields.length}}
+            <p class="dib-text-rules-empty">No fields — click Add Field to start parsing text regions.</p>
+            {{/unless}}
+          </div>
+
+          {{#if textScanContext}}
+            {{!-- Merged entry table --}}
+            <div class="dib-text-preview-meta">
+              {{textScanContext.entries.length}} entr{{#if (eq textScanContext.entries.length 1)}}y{{else}}ies{{/if}}
+              {{#if textScanContext.unmatchedCount}}
+              · <span class="dib-text-unmatched-count">{{textScanContext.unmatchedCount}} unmatched</span>
+              {{/if}}
+            </div>
+
+            {{#if textScanContext.hasEntries}}
+            <div class="dib-text-entries-scroll">
+              <table class="dib-text-entries-table">
+                <thead>
+                  <tr>
+                    {{#each textScanContext.columns}}
+                    <th class="dib-text-preview-th{{#if this.isJoinTarget}} dib-text-col-join{{/if}}"
+                        data-field-id="{{this.id}}" title="Click to configure">
+                      {{this.header}}{{#unless this.header}}(unnamed){{/unless}}
+                      {{#if this.isJoinTarget}}<i class="fas fa-link dib-join-icon" title="Join Target"></i>{{/if}}
+                      {{#if this.foundryAttr}}<span class="dib-col-attr-badge">→ {{this.foundryAttr}}</span>{{/if}}
+                    </th>
+                    {{/each}}
+                    {{#if textScanContext.unmatchedCount}}
+                    <th class="dib-text-entry-match-col">Match</th>
+                    {{/if}}
+                  </tr>
+                </thead>
+                <tbody>
+                  {{#each textScanContext.entries}}
+                  <tr class="dib-text-entry-row dib-text-match-{{this._matchStatus}}">
+                    {{#each this._cols}}
+                    <td class="dib-text-entry-td{{#if this.isJoinTarget}} dib-text-col-join{{/if}}" title="{{this.value}}">
+                      {{truncate this.value 80}}
+                    </td>
+                    {{/each}}
+                    {{#if @root.textScanContext.unmatchedCount}}
+                    <td class="dib-text-match-cell">
+                      {{#if (eq this._matchStatus "matched")}}
+                      <i class="fas fa-check dib-match-ok" title="Matched to table row"></i>
+                      {{else if (eq this._matchStatus "unmatched")}}
+                      <i class="fas fa-exclamation-triangle dib-match-warn" title="No matching table row found"></i>
+                      {{/if}}
+                    </td>
+                    {{/if}}
+                  </tr>
+                  {{/each}}
+                </tbody>
+              </table>
+            </div>
+            {{else}}
+            <div class="dib-text-empty">
+              No entries detected yet — click <strong>Refresh</strong>.
+            </div>
+            {{/if}}
+          {{else}}
+          <div class="scan-empty">
+            <i class="fas fa-align-left"></i>
+            <p>Draw <strong>Text Region</strong> areas in the <strong>PDF Planner</strong>, then click <strong>Refresh</strong>.</p>
+          </div>
+          {{/if}}
+        </div>
+      </div>
+
       {{!-- ── ITEMS PREVIEW ── --}}
       <div class="dib-tab-panel {{#if previewTabActive}}active{{/if}}" id="dib-tab-preview">
 
@@ -494,7 +745,7 @@
                     <tr class="preview-tr" data-item-key="{{this._key}}">
                       <td class="dib-sel-cell" title="Click to select row"></td>
                       {{#each ../columns}}
-                      <td class="preview-td" data-field="{{this.field}}">{{getField .. this.field}}</td>
+                      <td class="preview-td" data-field="{{this.field}}">{{cellValue .. this.field}}</td>
                       {{/each}}
                     </tr>
                     {{/each}}

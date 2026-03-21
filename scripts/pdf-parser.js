@@ -684,4 +684,426 @@ function findBestColumn(item, columns) {
   return best;
 }
 
-// detectTextSections removed — text region scanning is not used
+
+// ---------------------------------------------------------------------------
+// Text region parsing
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a name string for join/match comparisons.
+ * Lowercases, trims, removes trailing colon/punctuation, collapses whitespace.
+ */
+export function normalizeItemName(str) {
+  return String(str ?? '')
+    .toLowerCase()
+    .trim()
+    .replace(/:+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Determine whether a PDF text item appears to be bold or a heading.
+ *
+ * @param {Object} item           PDF text item
+ * @param {number} medianFontSize median fontSize of the whole block
+ * @param {string} [rowBodyFont]  most-common font name in this row (body text font);
+ *                                if provided and differs from item.fontName, the item
+ *                                is treated as a heading (handles subset-embedded PDFs
+ *                                where bold fonts have non-descriptive names)
+ */
+function isHeadingItem(item, medianFontSize, rowBodyFont) {
+  if (/bold|heavy|black/i.test(item.fontName ?? '')) return true;
+  if ((item.fontSize ?? 0) > medianFontSize + 1.5) return true;
+  // Mixed-font heuristic: if this row has two distinct font names, the minority
+  // font at the start of the row is the name/heading (inline bold pattern).
+  if (rowBodyFont && item.fontName && item.fontName !== rowBodyFont) return true;
+  return false;
+}
+
+/**
+ * Parse a block of items that contains multiple named entries
+ * (e.g. a page of Edges, armour descriptions, feats).
+ *
+ * Each entry starts when a heading item is detected (bold font or larger
+ * fontSize), optionally refined by a user-supplied namePattern regex.
+ *
+ * Returns: [{ _textName, _textDescription, [labeledField]: value, ... }]
+ *
+ * @param {Object[]} items   PDF text items within a region
+ * @param {Object}   config
+ * @param {string}   [config.namePattern]  optional regex to detect name lines
+ * @param {boolean}  [config.useFont=true] use font heuristics for name detection
+ */
+export function parseDescriptionBlock(items, config = {}) {
+  const { namePattern, useFont = true } = config;
+  const nameRe = namePattern?.trim() ? safeRegexText(namePattern, 'i') : null;
+
+  const rows = groupIntoRows(items);
+  if (!rows.length) return [];
+
+  // Compute median fontSize for the whole block
+  const allSizes = items.map(i => i.fontSize).filter(Boolean).sort((a, b) => a - b);
+  const medianSize = allSizes[Math.floor(allSizes.length / 2)] ?? 0;
+
+  const entries = [];
+  let current = null;
+
+  for (const row of rows) {
+    if (!row.items.length) continue;
+
+    const sortedItems = [...row.items].sort((a, b) => a.x - b.x);
+    const rowText = sortedItems.map(i => i.text).join(' ').trim();
+    if (!rowText) continue;
+
+    let isNameRow = false;
+    let nameText = '';
+    let descStart = '';
+
+    // Font heuristic: heading items at the start of the row
+    if (useFont) {
+      const firstX = sortedItems[0].x;
+
+      // Compute the majority (body) font name in this row.
+      // If the row has mixed fonts, the most-common font = body text;
+      // items at the row start with a different font = heading/name.
+      let rowBodyFont = null;
+      if (sortedItems.length > 1) {
+        const counts = {};
+        for (const i of sortedItems) {
+          if (i.fontName) counts[i.fontName] = (counts[i.fontName] ?? 0) + 1;
+        }
+        const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+        // Only use the mixed-font heuristic when there are at least 2 fonts
+        // AND the majority font appears more than once (avoids 1-item rows)
+        if (sorted.length >= 2 && sorted[0][1] > 1) rowBodyFont = sorted[0][0];
+      }
+
+      const headingItems = sortedItems.filter(i =>
+        isHeadingItem(i, medianSize, rowBodyFont) && Math.abs(i.x - firstX) < 20
+      );
+
+      if (headingItems.length > 0) {
+        isNameRow = true;
+        nameText = headingItems.map(i => i.text).join(' ').replace(/:$/, '').trim();
+        // Remaining non-heading items on the same row start the description
+        const restItems = sortedItems.filter(i => !headingItems.includes(i));
+        descStart = restItems.map(i => i.text).join(' ').trim();
+      }
+    }
+
+    // Regex fallback / override
+    if (!isNameRow && nameRe) {
+      const m = nameRe.exec(rowText);
+      if (m) {
+        isNameRow = true;
+        nameText = (m[1] ?? m[0]).replace(/:$/, '').trim();
+        descStart = rowText.slice(m.index + m[0].length).trim();
+      }
+    }
+
+    if (isNameRow && nameText) {
+      if (current) entries.push(current);
+      current = { _textName: nameText, _textDescription: descStart };
+    } else if (current) {
+      // Check for a labeled field line: "FieldName: value text"
+      const fieldMatch = /^([A-Z][A-Za-z][A-Za-z\s]{0,28}):\s+(.+)/.exec(rowText);
+      if (fieldMatch) {
+        const key = fieldMatch[1].trim();
+        const val = fieldMatch[2].trim();
+        // Avoid clobbering the reserved internal fields
+        if (key !== '_textName' && key !== '_textDescription') {
+          current[key] = current[key] ? current[key] + ' ' + val : val;
+        } else {
+          current._textDescription = current._textDescription
+            ? current._textDescription + ' ' + rowText
+            : rowText;
+        }
+      } else {
+        current._textDescription = current._textDescription
+          ? current._textDescription + ' ' + rowText
+          : rowText;
+      }
+    }
+  }
+
+  if (current) entries.push(current);
+  return entries;
+}
+
+
+// Regex helper local to text parsing (avoids coupling with rule-engine.js)
+function safeRegexText(pattern, flags = '') {
+  try { return new RegExp(pattern, flags); } catch { return null; }
+}
+
+/**
+ * Apply strip rules to an array of parsed text entries in-place.
+ * Each strip rule removes all matches of its pattern (case-insensitive) from _textName.
+ * @param {Object[]} entries
+ * @param {{pattern: string}[]} stripRules
+ */
+export function applyStripRules(entries, stripRules) {
+  if (!stripRules?.length) return;
+  for (const entry of entries) {
+    for (const rule of stripRules) {
+      try {
+        const re = new RegExp(rule.pattern, 'gi');
+        entry._textName = entry._textName.replace(re, '').trim();
+      } catch { /* invalid regex — skip */ }
+    }
+  }
+}
+
+/**
+ * Parse a block of PDF items using an ordered array of field definitions.
+ *
+ * Each field has:
+ *   - fieldType: 'link' (defines entry boundaries) | 'data' (captures text)
+ *   - rules: [{type:'target'|'strip', pattern}]
+ *
+ * The link field's target rules identify "start of new item" rows and split
+ * the text into per-item blocks. Data fields then claim rows within each block
+ * using their own target rules; a data field with no target rules is a catch-all
+ * that receives all unclaimed rows.
+ *
+ * @param {Object[]} items   PDF text items within the region
+ * @param {Object[]} fields  Ordered array of field definitions
+ * @returns {Object[]} Array of entry objects keyed by field.id, plus _textName
+ */
+/**
+ * Extract unique {fontSize, fontName} combinations from raw PDF items.
+ * fontSize is rounded to the nearest integer for stable comparison.
+ */
+export function extractRegionFonts(items) {
+  const seen = new Map();
+  for (const item of items) {
+    const size = Math.round(item.fontSize);
+    const key  = `${size}::${item.fontName}`;
+    if (!seen.has(key)) seen.set(key, { fontSize: size, fontName: item.fontName });
+  }
+  return [...seen.values()]
+    .sort((a, b) => b.fontSize - a.fontSize || a.fontName.localeCompare(b.fontName));
+}
+
+export function parseTextFields(items, fields) {
+  if (!fields?.length || !items?.length) return [];
+
+  // Build rows with font metadata (first item in each row as representative font)
+  const rowObjects = groupIntoRows(items)
+    .map(r => {
+      const sorted = r.items.sort((a, b) => a.x - b.x);
+      return {
+        text:     sorted.map(i => i.text).join(' ').trim(),
+        fontSize: sorted[0]?.fontSize ?? 0,
+        fontName: sorted[0]?.fontName ?? ''
+      };
+    })
+    .filter(o => o.text);
+  if (!rowObjects.length) return [];
+
+  // Build a combined matcher (font-target + regex-target) for a field's target rules.
+  // Returns null when the field has no active target rules.
+  function buildMatcher(field) {
+    const fontRules = (field.rules ?? []).filter(r =>
+      r.type === 'font-target' && (r.fontSize !== 'ALL' || r.fontName !== 'ALL')
+    );
+    const patterns = (field.rules ?? [])
+      .filter(r => (r.type === 'regex-target' || r.type === 'target') && r.pattern?.trim())
+      .map(r => r.pattern.trim());
+    const re = patterns.length ? safeRegexText(patterns.join('|'), 'i') : null;
+    if (!fontRules.length && !re) return null;
+    return (row) => {
+      for (const fr of fontRules) {
+        const sizeOk = !fr.fontSize || fr.fontSize === 'ALL' ||
+          Math.round(row.fontSize) === Math.round(Number(fr.fontSize));
+        const nameOk = !fr.fontName || fr.fontName === 'ALL' || row.fontName === fr.fontName;
+        if (!sizeOk || !nameOk) return false;
+      }
+      if (re && !re.test(row.text)) return false;
+      return true;
+    };
+  }
+
+  // Boundary field: isJoinTarget first, else first field with active target rules
+  const boundaryField = fields.find(f => f.isJoinTarget)
+    ?? fields.find(f => buildMatcher(f) !== null)
+    ?? null;
+  const boundaryMatcher = boundaryField ? buildMatcher(boundaryField) : null;
+
+  // Split rows into entry blocks at each boundary match
+  let blocks;
+  if (boundaryMatcher) {
+    blocks = [];
+    let current = null;
+    for (const row of rowObjects) {
+      if (boundaryMatcher(row)) {
+        if (current) blocks.push(current);
+        current = [row];
+      } else if (current) {
+        current.push(row);
+      }
+    }
+    if (current) blocks.push(current);
+    if (!blocks.length) return [];
+  } else {
+    blocks = [rowObjects];
+  }
+
+  // Catch-all: non-boundary field with no active target rules (gets all remaining text)
+  const catchAll = fields.find(f => f !== boundaryField && buildMatcher(f) === null) ?? null;
+
+  return blocks.map(block =>
+    _extractTextFieldValues(block, fields, boundaryField, catchAll, buildMatcher)
+  );
+}
+
+function _extractTextFieldValues(block, fields, boundaryField, catchAll, buildMatcher) {
+  const entry = {};
+  let remaining = [...block];
+
+  for (const field of fields) {
+    let rawValue;
+
+    if (field === boundaryField) {
+      // Extract only the regex-matched portion of the boundary row text.
+      // Font-target rules select which rows are boundaries but don't trim text content.
+      // Unmatched text after the regex match flows to subsequent fields.
+      // Rules are tried individually so each rule's group setting is respected.
+      const firstRow  = block[0];
+      const firstText = firstRow?.text ?? '';
+      const targetRules = (field.rules ?? [])
+        .filter(r => (r.type === 'regex-target' || r.type === 'target') && r.pattern?.trim());
+      let matched  = null;
+      let groupIdx = 0;
+      for (const tr of targetRules) {
+        const re = safeRegexText(tr.pattern.trim(), 'i');
+        if (!re) continue;
+        const m = re.exec(firstText);
+        if (m) { matched = m; groupIdx = Number(tr.group ?? 0); break; }
+      }
+      if (matched) {
+        rawValue = groupIdx > 0 ? (matched[groupIdx] ?? matched[0] ?? '') : matched[0];
+        // afterText always follows the full match end regardless of group
+        const afterText = firstText.slice(matched.index + matched[0].length).trim();
+        remaining = afterText
+          ? [{ ...firstRow, text: afterText }, ...block.slice(1)]
+          : block.slice(1);
+      } else {
+        rawValue  = firstText;
+        remaining = block.slice(1);
+      }
+    } else if (field === catchAll) {
+      rawValue  = remaining.map(r => r.text).join(' ');
+      remaining = [];
+    } else {
+      const matcher = buildMatcher(field);
+      if (matcher) {
+        const claimed = remaining.filter(row => matcher(row));
+        remaining     = remaining.filter(row => !matcher(row));
+        // If any target rule specifies a capture group, extract that group per row
+        const groupRules = (field.rules ?? []).filter(r =>
+          (r.type === 'regex-target' || r.type === 'target') && r.pattern?.trim() && Number(r.group ?? 0) > 0
+        );
+        if (groupRules.length) {
+          rawValue = claimed.map(r => {
+            for (const tr of groupRules) {
+              const re = safeRegexText(tr.pattern.trim(), 'i');
+              if (!re) continue;
+              const m = re.exec(r.text);
+              if (m) return m[Number(tr.group)] ?? r.text;
+            }
+            return r.text;
+          }).join(' ');
+        } else {
+          rawValue = claimed.map(r => r.text).join(' ');
+        }
+      } else {
+        rawValue = '';
+      }
+    }
+
+    rawValue = _applyFieldStrips(rawValue, field.rules);
+    entry[field.id] = rawValue;
+    if (rawValue) {
+      const htmlValue = applyFieldFormats(rawValue, field.rules);
+      if (htmlValue !== null) entry[field.id + '__html'] = htmlValue;
+    }
+    if (field === boundaryField) entry._textName = rawValue;
+  }
+
+  return entry;
+}
+
+function _applyFieldStrips(text, rules) {
+  for (const rule of rules.filter(r => r.type === 'strip' && r.pattern?.trim())) {
+    try { text = text.replace(new RegExp(rule.pattern, 'gi'), '').trim(); } catch { /* skip */ }
+  }
+  return text.trim();
+}
+
+function escapeHtml(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/**
+ * Apply format rules to a plain-text field value, producing an HTML string.
+ * Each format rule targets a regex pattern and applies inline markup and/or
+ * line breaks to every match.
+ *
+ * Returns null when there are no format rules (signals: no HTML needed).
+ *
+ * @param {string}   text
+ * @param {Object[]} rules  field.rules array
+ * @returns {string|null}
+ */
+export function applyFieldFormats(text, rules) {
+  const fmtRules = (rules ?? []).filter(r => r.type === 'format' && r.pattern?.trim());
+  if (!fmtRules.length) return null;
+
+  // Start by HTML-escaping the plain text
+  let html = escapeHtml(text);
+
+  for (const rule of fmtRules) {
+    try {
+      const re       = new RegExp(rule.pattern, 'gi');
+      const groupIdx = Number(rule.group ?? 0);
+      html = html.replace(re, (...args) => {
+        // args: [match, ...captureGroups, offset, fullString]
+        const match  = args[0];
+        const groups = args.slice(1, -2); // capture groups only
+
+        // Determine target text (full match or a specific capture group)
+        let target = match;
+        let pre = '', post = '';
+        if (groupIdx > 0 && groups[groupIdx - 1] != null) {
+          target = String(groups[groupIdx - 1]);
+          const idx = match.indexOf(target);
+          if (idx >= 0) {
+            pre  = match.slice(0, idx);
+            post = match.slice(idx + target.length);
+          }
+        }
+
+        let result = target;
+        // Inline markup (innermost first so nesting order is predictable)
+        if (rule.underline) result = `<u>${result}</u>`;
+        if (rule.italic)    result = `<em>${result}</em>`;
+        if (rule.bold)      result = `<strong>${result}</strong>`;
+        // Block-level transforms
+        if (rule.indent)    result = `<span style="margin-left:1.5em">${result}</span>`;
+        if (rule.header)    result = `<${rule.header}>${result}</${rule.header}>`;
+        // Line breaks (outermost)
+        if (rule.lineBreakBefore) result = '<br>' + result;
+        if (rule.lineBreakAfter)  result = result + '<br>';
+        return pre + result + post;
+      });
+    } catch { /* invalid pattern — skip rule */ }
+  }
+
+  return html;
+}

@@ -924,6 +924,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* HTML-formatted cells: allow wrapping and style inline markup */
+.preview-td p          { margin: 0 0 0.4em 0; white-space: normal; overflow: visible; text-overflow: clip; }
+.preview-td p:last-child { margin-bottom: 0; }
+.preview-td strong     { font-weight: 700; }
+.preview-td em         { font-style: italic; }
+.preview-td h1,.preview-td h2,.preview-td h3,.preview-td h4 { margin: 0 0 0.2em 0; font-weight: 700; }
 
 .preview-none {
   font-size: 11px;
@@ -1678,3 +1684,440 @@ div.ignore-tr {
   opacity: 0.7;
 }
 .dib-set-headers-btn:hover { opacity: 1; }
+
+/* ── Text Region ── */
+.dib-draw-btn-text {
+  border-color: #6b5fa0;
+  color: #9d8fe0;
+}
+.dib-draw-btn-text.active,
+.dib-draw-btn-text:hover {
+  background: rgba(107, 95, 160, 0.2);
+  border-color: #9d8fe0;
+  color: #c0b5f0;
+}
+.dib-tab-badge-text {
+  background: #6b5fa0;
+}
+.dib-tab-text {
+  color: #9d8fe0;
+}
+
+/* Region sidebar — text region config */
+.dib-region-item-text {
+  border-left-color: #6b5fa0;
+}
+.dib-region-item-text .dib-region-type-badge {
+  background: #6b5fa0;
+}
+.dib-region-text-config {
+  padding: 4px 8px 6px;
+  background: rgba(107, 95, 160, 0.08);
+  border-top: 1px solid rgba(107, 95, 160, 0.2);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dib-region-text-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.dib-region-text-row label {
+  white-space: nowrap;
+  color: var(--dib-text-muted);
+  cursor: pointer;
+}
+.dib-region-text-row select {
+  flex: 1;
+  font-size: 11px;
+  padding: 2px 4px;
+  background: var(--dib-input-bg, #1e1e1e);
+  border: 1px solid var(--dib-border, #444);
+  color: var(--dib-text, #ddd);
+  border-radius: 3px;
+}
+.dib-region-name-pattern {
+  width: 100%;
+  font-size: 11px;
+  padding: 2px 5px;
+  background: var(--dib-input-bg, #1e1e1e);
+  border: 1px solid var(--dib-border, #444);
+  color: var(--dib-text, #ddd);
+  border-radius: 3px;
+  font-family: monospace;
+}
+
+/* ── Field Rules ── */
+.dib-field-rules-section {
+  border: 1px solid rgba(107, 95, 160, 0.4);
+  border-radius: 4px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.dib-field-rules-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: rgba(107, 95, 160, 0.15);
+}
+.dib-field-rules-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: #c0b5f0;
+  margin-right: auto;
+}
+.dib-text-field-block {
+  border-top: 1px solid rgba(107, 95, 160, 0.25);
+}
+.dib-text-field-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  background: rgba(0,0,0,0.15);
+}
+.dib-field-join-target > .dib-text-field-header { border-left: 3px solid #80d080; }
+.dib-text-field-header-input {
+  flex: 1;
+  font-weight: 600;
+  font-size: 12px;
+  padding: 2px 5px;
+  background: var(--dib-input-bg, rgba(0,0,0,0.3));
+  border: 1px solid rgba(107, 95, 160, 0.3);
+  border-radius: 3px;
+  color: inherit;
+  min-width: 0;
+}
+.dib-text-field-attr-badge {
+  font-size: 10px;
+  font-family: monospace;
+  color: #7ab0d4;
+  white-space: nowrap;
+  flex-shrink: 0;
+  opacity: 0.8;
+}
+.dib-text-field-rule-adder {
+  display: flex;
+  gap: 4px;
+  padding: 3px 8px 5px;
+}
+.dib-field-catchall-note {
+  margin: 0;
+  padding: 3px 8px;
+}
+.dib-col-attr-badge {
+  display: block;
+  font-size: 9px;
+  font-family: monospace;
+  font-weight: normal;
+  opacity: 0.6;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dib-text-preview-th {
+  cursor: pointer;
+  user-select: none;
+}
+.dib-text-preview-th:hover { background: rgba(107, 95, 160, 0.2); }
+.dib-text-col-join { font-weight: 600; }
+.dib-join-icon {
+  font-size: 9px;
+  margin-left: 3px;
+  color: #80d080;
+  vertical-align: middle;
+}
+
+/* ── Text Name Rules ── */
+.dib-text-rules-section {
+  border: 1px solid rgba(107, 95, 160, 0.4);
+  border-radius: 4px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.dib-text-rules-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: rgba(107, 95, 160, 0.15);
+}
+.dib-text-rules-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: #c0b5f0;
+  margin-right: auto;
+}
+.dib-text-rule-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-top: 1px solid rgba(107, 95, 160, 0.2);
+}
+.dib-text-rule-badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  letter-spacing: 0.03em;
+}
+.dib-text-rule-target,
+.dib-text-rule-regex-target { background: rgba(80, 160, 80, 0.25); color: #80d080; }
+.dib-text-rule-font-target  { background: rgba(120, 80, 200, 0.25); color: #b08ede; }
+.dib-text-rule-strip        { background: rgba(200, 100, 50, 0.25); color: #e09060; }
+.dib-text-rule-format       { background: rgba(50, 140, 200, 0.25); color: #6ab4e8; }
+
+/* Format rule: two-line layout */
+.dib-format-rule-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+}
+.dib-format-rule-top {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px;
+}
+.dib-format-rule-top .dib-text-rule-input { flex: 1; min-width: 0; }
+.dib-fmt-group-input {
+  width: 38px;
+  font-size: 11px;
+  padding: 2px 3px;
+  text-align: center;
+  background: var(--dib-input-bg, rgba(0,0,0,0.3));
+  border: 1px solid rgba(50, 140, 200, 0.3);
+  border-radius: 3px;
+  color: inherit;
+  flex-shrink: 0;
+}
+.dib-format-options {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 4px 32px;
+  border-top: 1px solid rgba(50, 140, 200, 0.15);
+  flex-wrap: wrap;
+}
+.dib-fmt-opt {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.dib-fmt-opt input[type="checkbox"] { margin: 0; cursor: pointer; }
+.dib-fmt-opt strong { font-weight: 700; font-size: 12px; }
+.dib-fmt-opt em     { font-style: italic; font-size: 12px; }
+.dib-fmt-opt u      { text-decoration: underline; font-size: 12px; }
+.dib-fmt-header-select {
+  font-size: 11px;
+  padding: 1px 3px;
+  background: var(--dib-input-bg, rgba(0,0,0,0.3));
+  border: 1px solid rgba(50, 140, 200, 0.3);
+  border-radius: 3px;
+  color: inherit;
+}
+.dib-font-select {
+  font-size: 11px;
+  padding: 2px 4px;
+  background: var(--dib-input-bg, rgba(0,0,0,0.3));
+  border: 1px solid rgba(107, 95, 160, 0.3);
+  border-radius: 3px;
+  color: inherit;
+  flex: 1;
+  min-width: 0;
+}
+.dib-text-rule-input {
+  flex: 1;
+  font-size: 12px;
+  padding: 2px 6px;
+  background: var(--dib-input-bg, rgba(0,0,0,0.3));
+  border: 1px solid rgba(107, 95, 160, 0.3);
+  border-radius: 3px;
+  color: inherit;
+}
+.dib-text-rules-empty {
+  font-size: 11px;
+  color: var(--dib-text-muted);
+  padding: 5px 10px;
+  margin: 0;
+  font-style: italic;
+}
+
+/* ── Text Preview Tab ── */
+.dib-text-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 8px;
+  overflow-y: auto;
+  height: 100%;
+}
+.dib-text-region-section {
+  border: 1px solid rgba(107, 95, 160, 0.4);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.dib-text-region-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: rgba(107, 95, 160, 0.15);
+  flex-wrap: wrap;
+}
+.dib-text-region-label {
+  font-weight: 600;
+  font-size: 12px;
+  color: #c0b5f0;
+}
+.dib-text-region-meta {
+  font-size: 11px;
+  color: var(--dib-text-muted);
+}
+.dib-text-unmatched-count {
+  color: #e0a020;
+}
+.dib-text-region-controls {
+  border: 1px solid rgba(107, 95, 160, 0.4);
+  border-radius: 4px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.dib-text-region-control-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-top: 1px solid rgba(107, 95, 160, 0.2);
+}
+.dib-text-region-control-row:first-child { border-top: none; }
+.dib-text-preview-meta {
+  font-size: 11px;
+  color: var(--dib-text-muted);
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+.dib-text-region-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.dib-btn-accent {
+  background: rgba(107, 95, 160, 0.2);
+  border-color: #9d8fe0;
+  color: #c0b5f0;
+}
+.dib-btn-accent:hover {
+  background: rgba(107, 95, 160, 0.35);
+}
+.dib-btn-active {
+  background: rgba(107, 95, 160, 0.35);
+  border-color: #9d8fe0;
+  color: #c0b5f0;
+}
+.dib-text-linked-attrs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 5px 10px;
+  background: rgba(107, 95, 160, 0.08);
+  border-bottom: 1px solid rgba(107, 95, 160, 0.2);
+}
+.dib-text-linked-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(107, 95, 160, 0.25);
+  border: 1px solid #6b5fa0;
+  border-radius: 10px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: #c0b5f0;
+}
+.dib-text-unlink-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #9d8fe0;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.dib-text-unlink-btn:hover { color: #e04040; }
+
+.dib-text-entries-scroll {
+  overflow-x: auto;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.dib-text-entries-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.dib-text-entries-table th {
+  background: rgba(255,255,255,0.05);
+  padding: 4px 8px;
+  text-align: left;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--dib-text-muted);
+  position: sticky;
+  top: 0;
+  white-space: nowrap;
+}
+.dib-text-entries-table td {
+  padding: 3px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  vertical-align: top;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dib-text-entry-name {
+  font-weight: 600;
+  color: #c0b5f0;
+  max-width: 160px;
+}
+.dib-text-entry-desc {
+  color: var(--dib-text-muted);
+  max-width: 260px;
+}
+.dib-text-entry-row:hover td {
+  background: rgba(255,255,255,0.04);
+}
+/* Match status row colouring */
+.dib-text-match-matched td { /* no special styling — matched is fine */ }
+.dib-text-match-unmatched td {
+  background: rgba(224, 160, 32, 0.07);
+}
+.dib-match-ok   { color: #4caf50; }
+.dib-match-warn { color: #e0a020; }
+
+.dib-text-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--dib-text-muted);
+  font-size: 12px;
+}
+
+/* "Add Linked Text" button in Table Preview label bar */
+.dib-add-linked-text-btn {
+  opacity: 0.75;
+}
+.dib-add-linked-text-btn:hover { opacity: 1; }

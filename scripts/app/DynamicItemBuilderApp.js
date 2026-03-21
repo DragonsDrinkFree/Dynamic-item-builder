@@ -8,7 +8,8 @@
 
 import {
   loadPDF, extractPages, parsePageString, mergePageItems,
-  detectTables, renderPageToCanvas, applyColumnMerges, applyColumnSplits
+  detectTables, renderPageToCanvas, applyColumnMerges, applyColumnSplits,
+  parseDescriptionBlock, parseTextFields, extractRegionFonts, applyStripRules, normalizeItemName
 } from '../pdf-parser.js';
 import { applyRule }   from '../rule-engine.js';
 import { buildItems }  from '../item-builder.js';
@@ -44,7 +45,15 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       openAttributeMenu:   DynamicItemBuilderApp.#openAttributeMenu,
       acceptSuggestion:    DynamicItemBuilderApp.#acceptSuggestion,
       linkAllSuggestions:  DynamicItemBuilderApp.#linkAllSuggestions,
-      testRun:             DynamicItemBuilderApp.#testRun
+      testRun:             DynamicItemBuilderApp.#testRun,
+      addTextRule:         DynamicItemBuilderApp.#addTextRule,
+      deleteTextRule:      DynamicItemBuilderApp.#deleteTextRule,
+      addTextField:        DynamicItemBuilderApp.#addTextField,
+      deleteTextField:     DynamicItemBuilderApp.#deleteTextField,
+      moveTextField:       DynamicItemBuilderApp.#moveTextField,
+      addTextFieldRule:    DynamicItemBuilderApp.#addTextFieldRule,
+      deleteTextFieldRule: DynamicItemBuilderApp.#deleteTextFieldRule,
+      moveTextFieldRule:   DynamicItemBuilderApp.#moveTextFieldRule
     }
   };
 
@@ -80,6 +89,12 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
   /** @type {Object|null} detectTables() result for current rule */
   _scanData = null;
+
+  /** @type {Object} region.id → parsed text entries array */
+  _textScanData = {};
+
+  /** @type {Object} region.id → [{fontSize, fontName}] unique fonts in region */
+  _textRegionFonts = {};
 
   // ── Tab state ──────────────────────────────────────────────────────────────
 
@@ -159,6 +174,14 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       for (const path of (r.manualColumns ?? [])) {
         if (!linkedFields.has(path)) {
           cols.push({ field: path, label: path.split('.').pop(), manual: true });
+          linkedFields.add(path);
+        }
+      }
+      // Append text fields that have a Foundry attribute mapped
+      for (const tf of (r.textFields ?? [])) {
+        if (tf.foundryAttr && !linkedFields.has(tf.foundryAttr)) {
+          cols.push({ field: tf.foundryAttr, label: tf.header || tf.foundryAttr.split('.').pop() });
+          linkedFields.add(tf.foundryAttr);
         }
       }
 
@@ -171,6 +194,10 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
               const flat   = foundry.utils.flattenObject(item);
               flat._dibKey = dibKey;
               flat._key    = `${r.id}::${dibKey}`;
+              // Auto-flag cells that carry HTML from format rules so the template renders them safely
+              if (item.__htmlFields) {
+                for (const hField of Object.keys(item.__htmlFields)) flat[`__html__${hField}`] = true;
+              }
               // Apply any per-cell value overrides
               const ovr = this._cellOverrides[r.id]?.[dibKey] ?? {};
               for (const [ovField, ovVal] of Object.entries(ovr)) flat[ovField] = ovVal;
@@ -199,7 +226,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       .map(f => ({ id: f.id, name: '\u00a0'.repeat((f.depth ?? 0) * 2) + f.name }));
 
     // Guard: removed tabs — fall back to tables
-    if (this._rightTab === 'suggested' || this._rightTab === 'text') this._rightTab = 'tables';
+    if (this._rightTab === 'suggested') this._rightTab = 'tables';
 
     // Attribute link suggestions — computed from detected columns vs available paths
     const suggestions = rule && attributePaths.length && this._scanData
@@ -241,6 +268,9 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     attributeList.sort((a, b) => ({ linked: 0, suggested: 1, none: 2 }[a.status] ?? 2) - ({ linked: 0, suggested: 1, none: 2 }[b.status] ?? 2));
     const suggestionCount = attributeList.filter(a => a.suggested).length;
 
+    const textScanContext = this.#buildTextScanContext(rule);
+    const textFontsJson   = JSON.stringify(textScanContext?.availableFonts ?? []);
+
     return {
       hasPdf:    !!this._pdf,
       pdfName:   this._pdfName,
@@ -264,9 +294,15 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       drawMode:    this._drawMode,
       // Right panel tabs
       tablesTabActive:  this._rightTab === 'tables',
+      textTabActive:    this._rightTab === 'text',
       previewTabActive: this._rightTab === 'preview',
       // Region counts for badges
       tableRegionCount: (rule?.regions ?? []).filter(r => r.type === 'table').length,
+      textRegionCount:  (rule?.regions ?? []).filter(r => r.type === 'text').length,
+      hasTextRegions:   (rule?.regions ?? []).some(r => r.type === 'text'),
+      // Text scan data for the Text Preview tab
+      textScanContext,
+      textFontsJson,
       // Attribute mapping list
       attributeList,
       suggestionCount,
@@ -373,7 +409,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       viewport.addEventListener('mousedown', e => this.#handlePlannerMousedown(e));
     }
 
-    // Region sidebar: label + group field changes
+    // Region sidebar: label + group + text region config field changes
     el.querySelector('.dib-region-sidebar')?.addEventListener('change', e => {
       const input = e.target.closest('[data-region-field]');
       if (!input) return;
@@ -381,7 +417,98 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       const field = input.dataset.regionField;
       const rule  = this.selectedRule;
       const region = (rule?.regions ?? []).find(r => r.id === id);
-      if (region) { region[field] = input.value; this.#updateRegionOverlay(); }
+      if (!region) return;
+      // Checkboxes use .checked; selects and text inputs use .value
+      region[field] = input.type === 'checkbox' ? input.checked : input.value;
+      this.#schedulePreview();
+      this.#updateRegionOverlay();
+    });
+
+    // Legacy Name Rules inputs — update data only, no auto-refresh
+    el.querySelector('.dib-text-rules-section')?.addEventListener('input', e => {
+      const input = e.target.closest('.dib-text-rule-input');
+      if (!input) return;
+      const rule = this.selectedRule;
+      const tr = (rule?.textRules ?? []).find(r => r.id === input.dataset.textRuleId);
+      if (tr) tr.pattern = input.value;
+    });
+
+    // Field Rules: input changes (header, foundryAttr, rule patterns) — no auto-refresh
+    el.querySelector('.dib-field-rules-section')?.addEventListener('input', e => {
+      const rule = this.selectedRule;
+      if (!rule) return;
+      const fieldEl = e.target.closest('[data-field-id]');
+      if (!fieldEl) return;
+      const tf = (rule.textFields ?? []).find(f => f.id === fieldEl.dataset.fieldId);
+      if (!tf) return;
+      const prop = e.target.dataset.fieldProp;
+      if (prop === 'header')      { tf.header      = e.target.value; return; }
+      if (prop === 'foundryAttr') { tf.foundryAttr = e.target.value; return; }
+      // Rule pattern input inside this field — only when the target itself has data-rule-id
+      // (avoids picking up checkboxes/selects inside format rule rows whose ancestor has it)
+      if (e.target.dataset.ruleId) {
+        const tr = (tf.rules ?? []).find(r => r.id === e.target.dataset.ruleId);
+        if (tr) tr.pattern = e.target.value;
+      }
+    });
+
+    // Field Rules: font-target select changes (font size filters font name dropdown)
+    el.querySelector('.dib-field-rules-section')?.addEventListener('change', e => {
+      const rule     = this.selectedRule;
+      if (!rule) return;
+      const fieldEl  = e.target.closest('[data-field-id]');
+      const ruleEl   = e.target.closest('[data-rule-id]');
+      if (!fieldEl || !ruleEl) return;
+      const tf = (rule.textFields ?? []).find(f => f.id === fieldEl.dataset.fieldId);
+      const tr = (tf?.rules ?? []).find(r => r.id === ruleEl.dataset.ruleId);
+      if (!tr) return;
+
+      // Format rule: checkboxes and header select
+      if (tr.type === 'format') {
+        const prop = e.target.dataset.formatProp;
+        if (!prop) return;
+        tr[prop] = e.target.type === 'checkbox' ? e.target.checked
+                 : e.target.type === 'number'   ? Number(e.target.value)
+                 : e.target.value;
+        this.#schedulePreview();
+        return;
+      }
+
+      // Regex-target / target rule: group number input
+      if (tr.type === 'regex-target' || tr.type === 'target') {
+        if (e.target.dataset.ruleProp !== 'group') return;
+        tr.group = Number(e.target.value);
+        this.#schedulePreview();
+        return;
+      }
+
+      if (tr.type !== 'font-target') return;
+
+      if (e.target.classList.contains('dib-font-size-select')) {
+        tr.fontSize = e.target.value;
+        // Filter the adjacent font-name select options
+        const section   = e.target.closest('.dib-field-rules-section');
+        const allFonts  = JSON.parse(section?.dataset.fonts ?? '[]');
+        const nameSelect = ruleEl.querySelector('.dib-font-name-select');
+        if (nameSelect) {
+          const filtered = tr.fontSize === 'ALL'
+            ? [...new Set(allFonts.map(f => f.fontName))]
+            : [...new Set(allFonts.filter(f => String(f.fontSize) === tr.fontSize).map(f => f.fontName))];
+          // Reset to ALL if current selection is no longer valid
+          if (tr.fontName !== 'ALL' && !filtered.includes(tr.fontName)) tr.fontName = 'ALL';
+          nameSelect.innerHTML = '<option value="ALL">ALL</option>'
+            + filtered.map(n => `<option value="${n}"${n === tr.fontName ? ' selected' : ''}>${n}</option>`).join('');
+        }
+      } else if (e.target.classList.contains('dib-font-name-select')) {
+        tr.fontName = e.target.value;
+      }
+      this.#schedulePreview();
+    });
+
+    // Text Preview: column header clicks
+    el.querySelector('.dib-text-preview')?.addEventListener('click', e => {
+      const th = e.target.closest('.dib-text-preview-th');
+      if (th) this.#showTextColumnMenu(e, th);
     });
 
     // Scan cell clicks (Table Preview)
@@ -652,17 +779,21 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
     const typeLabel = this._drawMode === 'table' ? 'Table' : 'Text';
     const count     = rule.regions.filter(r => r.type === this._drawMode).length + 1;
-    const group     = `${this._drawMode}-${count}`;
 
-    rule.regions.push({
+    const newRegion = {
       id:    foundry.utils.randomID(),
       type:  this._drawMode,
-      group,
       page:  this._plannerPage,
       x: Math.round(rect.x), y: Math.round(rect.y),
       w: Math.round(rect.w), h: Math.round(rect.h),
       label: `${typeLabel} ${count}`
-    });
+    };
+
+    if (this._drawMode === 'text') {
+      newRegion.standalone = false;
+    }
+
+    rule.regions.push(newRegion);
 
     this.#schedulePreview();
     this.render();
@@ -896,7 +1027,9 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
   async #runScan() {
     const rule = this.selectedRule;
     if (!this._pdf || !rule?.pages) {
-      this._scanData = null;
+      this._scanData        = null;
+      this._textScanData    = {};
+      this._textRegionFonts = {};
       return;
     }
 
@@ -904,6 +1037,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       const pageNums     = parsePageString(rule.pages, this._pdf.numPages);
       const pages        = await extractPages(this._pdf, pageNums);
       const tableRegions = (rule.regions ?? []).filter(r => r.type === 'table');
+      const textRegions  = (rule.regions ?? []).filter(r => r.type === 'text');
 
       if (tableRegions.length > 0) {
         this._scanData = this.#scanTableRegions(pages, tableRegions);
@@ -911,6 +1045,34 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         // Auto-detect fallback
         const allItems = mergePageItems(pages);
         this._scanData = detectTables(allItems);
+      }
+
+      // Scan text regions
+      const textFields = rule.textFields?.length ? rule.textFields : null;
+      this._textScanData    = {};
+      this._textRegionFonts = {};
+      for (const region of textRegions) {
+        const page = pages.find(p => p.pageNum === region.page);
+        if (!page) continue;
+        const regionItems = this.#filterItemsToRegion(page, region);
+        if (!regionItems.length) continue;
+
+        this._textRegionFonts[region.id] = extractRegionFonts(regionItems);
+
+        let entries;
+        if (textFields) {
+          entries = parseTextFields(regionItems, textFields);
+        } else {
+          const textRules   = rule.textRules ?? [];
+          const namePattern = textRules
+            .filter(r => r.type === 'target' && r.pattern?.trim())
+            .map(r => r.pattern.trim())
+            .join('|') || undefined;
+          const stripRules = textRules.filter(r => r.type === 'strip' && r.pattern?.trim());
+          entries = parseDescriptionBlock(regionItems, { namePattern, useFont: true });
+          applyStripRules(entries, stripRules);
+        }
+        this._textScanData[region.id] = entries;
       }
     } catch (err) {
       console.warn('Dynamic Item Builder | Scan error:', err);
@@ -985,40 +1147,294 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
    * the first region in the group are used as the canonical schema).
    */
   #scanTableRegions(pages, regions) {
-    // Group regions by their `group` key, in page→Y order
-    const groups = new Map();
-    for (const region of [...regions].sort((a, b) => a.page - b.page || a.y - b.y)) {
-      if (!groups.has(region.group)) groups.set(region.group, []);
-      groups.get(region.group).push(region);
-    }
+    // All table regions on a rule are one logical pool — sort page→Y, apply y-offsets
+    const sorted = [...regions].sort((a, b) => a.page - b.page || a.y - b.y);
+    let yOffset  = 0;
+    const allItems = [];
 
-    const tables    = [];
-    const proseRows = [];
-
-    for (const [, groupRegions] of groups) {
-      let yOffset    = 0;
-      const groupItems = [];
-
-      for (const region of groupRegions) {
-        const page = pages.find(p => p.pageNum === region.page);
-        if (!page) continue;
-        const regionItems = this.#filterItemsToRegion(page, region);
-        for (const item of regionItems) {
-          groupItems.push({ ...item, y: item.y + yOffset });
-        }
-        if (regionItems.length) {
-          yOffset += Math.max(...regionItems.map(i => i.y)) + 50;
-        }
+    for (const region of sorted) {
+      const page = pages.find(p => p.pageNum === region.page);
+      if (!page) continue;
+      const regionItems = this.#filterItemsToRegion(page, region);
+      for (const item of regionItems) {
+        allItems.push({ ...item, y: item.y + yOffset });
       }
-
-      if (!groupItems.length) continue;
-      const result = detectTables(groupItems);
-      tables.push(...result.tables);
-      proseRows.push(...result.proseRows);
+      if (regionItems.length) {
+        yOffset += Math.max(...regionItems.map(i => i.y)) + 50;
+      }
     }
 
-    tables.forEach((t, i) => { t.id = `tbl-${i}`; });
-    return { tables, proseRows };
+    if (!allItems.length) return { tables: [], proseRows: [] };
+    const result = detectTables(allItems);
+    result.tables.forEach((t, i) => { t.id = `tbl-${i}`; });
+    return result;
+  }
+
+  /**
+   * Build the data context for the Text Preview tab.
+   * Returns an array of region objects, each with their parsed entries enriched
+   * with match status (matched/unmatched/unlinked) relative to the table scan.
+   */
+  #buildTextScanContext(rule) {
+    if (!rule) return null;
+    const textRegions = (rule.regions ?? []).filter(r => r.type === 'text');
+    if (!textRegions.length) return null;
+
+    const textFields = rule.textFields?.length ? rule.textFields : null;
+    const nameAttr   = (rule.attributes ?? []).find(a => a.foundryField === 'name' && !a.isVirtual);
+    const allEntries = [];
+
+    for (const region of textRegions) {
+      const entries = this._textScanData[region.id] ?? [];
+      allEntries.push(...entries);
+    }
+
+    // Build column definitions
+    let columns;
+    if (textFields) {
+      columns = textFields.map(f => ({
+        id:           f.id,
+        header:       f.header || (f.isJoinTarget ? 'Name' : 'Data'),
+        isJoinTarget: !!f.isJoinTarget,
+        foundryAttr:  f.foundryAttr ?? ''
+      }));
+    } else {
+      // Legacy path: fixed Name + Description columns plus any labeled keys
+      const extraKeys = new Set();
+      for (const e of allEntries) {
+        for (const k of Object.keys(e)) { if (!k.startsWith('_')) extraKeys.add(k); }
+      }
+      columns = [
+        { id: '_textName',        header: 'Name',        isJoinTarget: true,  foundryAttr: '' },
+        ...[...extraKeys].map(k => ({ id: k, header: k, isJoinTarget: false, foundryAttr: '' })),
+        { id: '_textDescription', header: 'Description',  isJoinTarget: false, foundryAttr: '' }
+      ];
+    }
+
+    // Determine whether we have a table to match against
+    const hasTables = (this._scanData?.tables?.length ?? 0) > 0;
+    const joinField = textFields?.find(f => f.isJoinTarget);
+
+    const enrichedEntries = allEntries.map(entry => {
+      let matchStatus = 'unlinked';
+      const canMatch = hasTables && (joinField || nameAttr);
+      if (canMatch) {
+        const normEntry = normalizeItemName(entry._textName ?? '');
+        let found = false;
+        for (const table of (this._scanData?.tables ?? [])) {
+          for (const row of table.rows) {
+            if (row._injected || row._sectionHeader) continue;
+            const nameCell = nameAttr
+              ? row.cells.find(c => c.column === nameAttr.columnHeader)
+              : row.cells[0];
+            if (!nameCell) continue;
+            const normRow = normalizeItemName(nameCell.value);
+            if (normRow === normEntry || normRow.includes(normEntry) || normEntry.includes(normRow)) {
+              found = true; break;
+            }
+          }
+          if (found) break;
+        }
+        matchStatus = found ? 'matched' : 'unmatched';
+      }
+      const _cols = columns.map(c => ({ id: c.id, header: c.header, isJoinTarget: c.isJoinTarget, value: entry[c.id] ?? '' }));
+      return { ...entry, _matchStatus: matchStatus, _cols };
+    });
+
+    // Aggregate unique fonts across all text regions for the field rule dropdowns
+    const fontSet = new Map();
+    for (const region of textRegions) {
+      for (const f of (this._textRegionFonts[region.id] ?? [])) {
+        const key = `${f.fontSize}::${f.fontName}`;
+        if (!fontSet.has(key)) fontSet.set(key, f);
+      }
+    }
+    const availableFonts     = [...fontSet.values()].sort((a, b) => b.fontSize - a.fontSize || a.fontName.localeCompare(b.fontName));
+    const availableFontSizes = [...new Set(availableFonts.map(f => String(f.fontSize)))];
+    const availableFontNames = [...new Set(availableFonts.map(f => f.fontName))];
+
+    return {
+      columns,
+      entries:           enrichedEntries,
+      hasEntries:        enrichedEntries.length > 0,
+      unmatchedCount:    enrichedEntries.filter(e => e._matchStatus === 'unmatched').length,
+      availableFonts,
+      availableFontSizes,
+      availableFontNames
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Text column header menu
+  // -------------------------------------------------------------------------
+
+  #showTextColumnMenu(event, th) {
+    event.stopPropagation();
+    const fieldId = th.dataset.fieldId;
+    if (!fieldId) return;
+    const rule = this.selectedRule;
+    if (!rule) return;
+    const tf = (rule.textFields ?? []).find(f => f.id === fieldId);
+    if (!tf) return;
+
+    const menuItems = [];
+
+    // Join Target toggle
+    if (tf.isJoinTarget) {
+      menuItems.push({
+        icon: 'fa-unlink',
+        label: 'Remove Join Target',
+        action: () => { tf.isJoinTarget = false; this.#schedulePreview(); this.render(); }
+      });
+    } else {
+      menuItems.push({
+        icon: 'fa-link',
+        label: 'Set as Join Target',
+        action: () => {
+          for (const f of (rule.textFields ?? [])) f.isJoinTarget = false;
+          tf.isJoinTarget = true;
+          this.#schedulePreview();
+          this.render();
+        }
+      });
+    }
+
+    // Link Attribute
+    if (this._cachedAttributePaths?.length) {
+      menuItems.push({ separator: true });
+      menuItems.push({ heading: `Map "${tf.header || 'field'}" to attribute:` });
+      menuItems.push({ filterInput: true });
+      for (const attr of this._cachedAttributePaths) {
+        menuItems.push({
+          icon: 'fa-database', label: attr.path, filterable: true,
+          action: () => { tf.foundryAttr = attr.path; this.#schedulePreview(); this.render(); }
+        });
+      }
+      if (tf.foundryAttr) {
+        menuItems.push({ separator: true });
+        menuItems.push({
+          icon: 'fa-times',
+          label: 'Clear attribute mapping',
+          action: () => { tf.foundryAttr = ''; this.render(); }
+        });
+      }
+    }
+
+    this.#showContextMenu(event, menuItems);
+  }
+
+  // -------------------------------------------------------------------------
+  // Text rules
+  // -------------------------------------------------------------------------
+
+  static #addTextRule(event, target) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    rule.textRules ??= [];
+    rule.textRules.push({ id: foundry.utils.randomID(), type: target.dataset.ruleType ?? 'target', pattern: '' });
+    this.render();
+  }
+
+  static #deleteTextRule(event, target) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    const id = target.closest('[data-text-rule-id]')?.dataset.textRuleId;
+    rule.textRules = (rule.textRules ?? []).filter(r => r.id !== id);
+    this.#schedulePreview();
+    this.render();
+  }
+
+  // -------------------------------------------------------------------------
+  // Field rules actions
+  // -------------------------------------------------------------------------
+
+  static #addTextField() {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    rule.textFields ??= [];
+    rule.textFields.push({
+      id:           foundry.utils.randomID(),
+      header:       '',
+      isJoinTarget: false,
+      foundryAttr:  '',
+      rules:        []
+    });
+    this.render();
+  }
+
+  static #deleteTextField(event, target) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    const id = target.closest('[data-field-id]')?.dataset.fieldId;
+    rule.textFields = (rule.textFields ?? []).filter(f => f.id !== id);
+    this.#schedulePreview();
+    this.render();
+  }
+
+  static #moveTextField(event, target) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    const id  = target.closest('[data-field-id]')?.dataset.fieldId;
+    const dir = target.dataset.dir;
+    const arr = rule.textFields ?? [];
+    const idx = arr.findIndex(f => f.id === id);
+    if (idx < 0) return;
+    const swap = dir === 'up' ? idx - 1 : idx + 1;
+    if (swap < 0 || swap >= arr.length) return;
+    [arr[idx], arr[swap]] = [arr[swap], arr[idx]];
+    this.render();
+  }
+
+  static #addTextFieldRule(event, target) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    const fieldId = target.closest('[data-field-id]')?.dataset.fieldId;
+    const tf = (rule.textFields ?? []).find(f => f.id === fieldId);
+    if (!tf) return;
+    tf.rules ??= [];
+    const ruleType = target.dataset.ruleType ?? 'regex-target';
+    if (ruleType === 'font-target') {
+      tf.rules.push({ id: foundry.utils.randomID(), type: 'font-target', fontSize: 'ALL', fontName: 'ALL' });
+    } else if (ruleType === 'format') {
+      tf.rules.push({
+        id: foundry.utils.randomID(), type: 'format', pattern: '',
+        group: 0,
+        lineBreakBefore: false, lineBreakAfter: false,
+        bold: false, italic: false, underline: false, indent: false, header: ''
+      });
+    } else {
+      tf.rules.push({ id: foundry.utils.randomID(), type: ruleType, pattern: '', group: 0 });
+    }
+    this.render();
+  }
+
+  static #deleteTextFieldRule(event, target) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    const fieldId = target.closest('[data-field-id]')?.dataset.fieldId;
+    const ruleId  = target.closest('[data-rule-id]')?.dataset.ruleId;
+    const tf = (rule.textFields ?? []).find(f => f.id === fieldId);
+    if (!tf) return;
+    tf.rules = (tf.rules ?? []).filter(r => r.id !== ruleId);
+    this.#schedulePreview();
+    this.render();
+  }
+
+  static #moveTextFieldRule(event, target) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    const fieldId = target.closest('[data-field-id]')?.dataset.fieldId;
+    const ruleId  = target.closest('[data-rule-id]')?.dataset.ruleId;
+    const dir     = target.dataset.dir;
+    const tf = (rule.textFields ?? []).find(f => f.id === fieldId);
+    if (!tf) return;
+    const arr = tf.rules ?? [];
+    const idx = arr.findIndex(r => r.id === ruleId);
+    if (idx < 0) return;
+    const swap = dir === 'up' ? idx - 1 : idx + 1;
+    if (swap < 0 || swap >= arr.length) return;
+    [arr[idx], arr[swap]] = [arr[swap], arr[idx]];
+    this.render();
   }
 
   // -------------------------------------------------------------------------
@@ -1717,8 +2133,10 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     if (event.target.closest('[data-action="deleteRule"]')) return;
     const id = target.closest('[data-rule-id]')?.dataset.ruleId;
     if (!id || id === this._selectedRuleId) return;
-    this._selectedRuleId = id;
-    this._scanData = null;
+    this._selectedRuleId  = id;
+    this._scanData        = null;
+    this._textScanData    = {};
+    this._textRegionFonts = {};
     this.#snapPlannerPage();
     this.render();
     await this.#runScan();
@@ -2130,7 +2548,18 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         if (!Array.isArray(data.rules)) throw new Error('Missing "rules" array.');
         const imported = data.rules.map(r => ({ ...makeDefaultRule(), ...r, id: foundry.utils.randomID() }));
         this._rules.push(...imported);
-        this._selectedRuleId = imported[0]?.id ?? this._selectedRuleId;
+        this._selectedRuleId  = imported[0]?.id ?? this._selectedRuleId;
+        this._scanData        = null;
+        this._textScanData    = {};
+        this._textRegionFonts = {};
+        // Snap planner page to the first valid page for the imported rule
+        // (inlined from #snapPlannerPage to avoid TS error inside arrow callback)
+        if (this._pdfPages) {
+          const validPages = parsePageString(this.selectedRule?.pages ?? '', this._pdfPages);
+          if (validPages.length && !validPages.includes(this._plannerPage)) {
+            this._plannerPage = validPages[0];
+          }
+        }
         ui.notifications.info(`Imported ${imported.length} rule(s) from "${file.name}".`);
         this.render();
       } catch (err) {
@@ -2150,7 +2579,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 // -------------------------------------------------------------------------
 
 function getSystemItemTypes() {
-  const types = game.documentTypes?.Item ?? Object.keys(game.system.template?.Item ?? {});
+  const types = game.documentTypes?.Item ?? [];
   return types
     .filter(t => t !== 'base' && t !== 'types')
     .map(t => ({ value: t, label: t.charAt(0).toUpperCase() + t.slice(1) }));
@@ -2159,19 +2588,17 @@ function getSystemItemTypes() {
 async function getItemAttributePaths(itemType) {
   const paths = [{ path: 'name', label: 'Name' }, { path: 'img', label: 'Image' }];
   if (!itemType) return paths;
-  const template = game.system.template?.Item?.[itemType] ?? {};
-  const flat = foundry.utils.flattenObject(template);
-  for (const key of Object.keys(flat)) paths.push({ path: `system.${key}`, label: key });
 
-  if (paths.length <= 2 && game.documentTypes?.Item?.includes(itemType)) {
-    try {
-      const tmp = new Item({ name: '_tmp', type: itemType });
-      const sysFlat = foundry.utils.flattenObject(tmp.toObject().system ?? {});
-      for (const key of Object.keys(sysFlat)) {
-        if (!paths.some(p => p.path === `system.${key}`)) paths.push({ path: `system.${key}`, label: key });
-      }
-    } catch { /* ignore */ }
-  }
+  // Instantiate a temporary item of the target type to get its data model — this
+  // works in v12+ without touching the deprecated game.system.template API.
+  try {
+    const tmp = new Item({ name: '_tmp', type: itemType });
+    const sysFlat = foundry.utils.flattenObject(tmp.toObject().system ?? {});
+    for (const key of Object.keys(sysFlat)) {
+      paths.push({ path: `system.${key}`, label: key });
+    }
+  } catch { /* ignore — item type may not be valid yet */ }
+
   return paths;
 }
 
