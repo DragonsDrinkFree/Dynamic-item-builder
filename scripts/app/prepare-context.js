@@ -67,52 +67,6 @@ export function buildPreviewSummary(rules, preview, cellOverrides) {
 }
 
 /**
- * Build the attribute mapping list for the Item Planner panel.
- *
- * @param {Object} rule           — selected rule (may be null)
- * @param {Array}  attributePaths — available Foundry item paths
- * @param {Array}  suggestions    — computed suggestions from the suggestion engine
- * @returns {{ attributeList: Array, suggestionCount: number }}
- */
-export function buildAttributeList(rule, attributePaths, suggestions) {
-  const seenPaths    = new Set();
-  const attributeList = attributePaths.map(attr => {
-    seenPaths.add(attr.path);
-    const mapping    = rule?.attributes.find(a => a.foundryField === attr.path && a.columnHeader);
-    const suggestion = suggestions.find(s => s.suggestedField === attr.path);
-    const inPreview  = !mapping && (rule?.manualColumns ?? []).includes(attr.path);
-    return {
-      path:                attr.path,
-      shortLabel:          attr.path.split('.').pop(),
-      linked:              !!mapping,
-      columnHeader:        mapping?.columnHeader ?? '',
-      transform:           mapping?.transform ?? 'trim',
-      suggested:           !mapping && !!suggestion,
-      suggestedColumn:     suggestion?.columnHeader ?? '',
-      suggestedScoreClass: suggestion?.scoreClass ?? '',
-      suggestedScoreLabel: suggestion?.scoreLabel ?? '',
-      status:              mapping ? 'linked' : (suggestion ? 'suggested' : 'none'),
-      inPreview
-    };
-  });
-  // Append any custom mappings pointing to paths not in the standard list
-  for (const attr of (rule?.attributes ?? [])) {
-    if (attr.foundryField && !seenPaths.has(attr.foundryField) && attr.columnHeader) {
-      attributeList.push({
-        path: attr.foundryField, shortLabel: attr.foundryField.split('.').pop(),
-        linked: true, columnHeader: attr.columnHeader, transform: attr.transform ?? 'trim',
-        suggested: false, suggestedColumn: '', suggestedScoreClass: '', suggestedScoreLabel: '',
-        status: 'linked', inPreview: false
-      });
-    }
-  }
-  attributeList.sort((a, b) => ({ linked: 0, suggested: 1, none: 2 }[a.status] ?? 2) - ({ linked: 0, suggested: 1, none: 2 }[b.status] ?? 2));
-  const suggestionCount = attributeList.filter(a => a.suggested).length;
-
-  return { attributeList, suggestionCount };
-}
-
-/**
  * Enrich text entries with match status relative to table scan data.
  * Each entry gets `_matchStatus` ('matched' | 'unmatched' | 'unlinked')
  * and `_cols` (column values mapped from the entry).

@@ -88,3 +88,25 @@ export function showContextMenu(event, items) {
   };
   setTimeout(() => document.addEventListener('pointerdown', close, true), 0);
 }
+
+/**
+ * Build a filterable attribute-mapping submenu (separator + heading + filter + items).
+ * Appended to an existing menuItems array; caller decides action per attribute.
+ *
+ * @param {Array}    menuItems      — mutable array to push items onto
+ * @param {string}   label          — what's being mapped (e.g. column header or field name)
+ * @param {Array}    attributePaths — [{ path, label }]
+ * @param {Function} onSelect       — (attrPath: string) => void
+ */
+export function appendAttributeMappingMenu(menuItems, label, attributePaths, onSelect) {
+  if (!attributePaths?.length) return;
+  menuItems.push({ separator: true });
+  menuItems.push({ heading: `Map "${label}" to field:` });
+  menuItems.push({ filterInput: true });
+  for (const attr of attributePaths) {
+    menuItems.push({
+      icon: 'fa-link', label: attr.path, filterable: true,
+      action: () => onSelect(attr.path)
+    });
+  }
+}

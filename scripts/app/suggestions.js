@@ -106,10 +106,10 @@ export function enrichScanDataColumns(scanData, rule, suggestions) {
       ...table,
       columns: table.columns.map(col => {
         if (!col.header) return { ...col, status: 'none' };
-        const linked    = rule?.attributes.some(a => a.columnHeader === col.header && a.foundryField);
-        if (linked) return { ...col, status: 'linked' };
-        const suggested = suggestions.some(s => s.columnHeader === col.header);
-        return { ...col, status: suggested ? 'suggested' : 'none' };
+        const linkedAttr = rule?.attributes.find(a => a.columnHeader === col.header && a.foundryField);
+        if (linkedAttr) return { ...col, status: 'linked', mappedField: linkedAttr.foundryField };
+        const match = suggestions.find(s => s.columnHeader === col.header);
+        return { ...col, status: match ? 'suggested' : 'none', mappedField: match?.suggestedField ?? '' };
       })
     }))
   };

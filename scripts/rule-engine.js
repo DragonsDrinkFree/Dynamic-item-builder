@@ -320,7 +320,7 @@ function extractAttributes(context, attributeRules, rule) {
 
 function applyTransform(value, transform) {
   switch (transform) {
-    case 'number':    return isNaN(Number(value)) ? 0 : Number(value);
+    case 'number':    { const n = Number(value); return isNaN(n) ? value : n; }
     case 'lowercase': return value.toLowerCase();
     case 'uppercase': return value.toUpperCase();
     case 'boolean':   return ['true', 'yes', '1', 'x', '✓'].includes(value.toLowerCase());

@@ -15,13 +15,13 @@ import {
 import { applyRule }   from '../rule-engine.js';
 import { buildItems }  from '../item-builder.js';
 import { escapeRegex } from '../utils.js';
-import { showContextMenu } from './context-menu.js';
+import { showContextMenu, appendAttributeMappingMenu } from './context-menu.js';
 import { computeSuggestionsForRule, enrichScanDataColumns } from './suggestions.js';
-import { getSystemItemTypes, getItemAttributePaths, makeDefaultRule, makeDefaultAttribute, TRANSFORMS } from './factories.js';
+import { getSystemItemTypes, getItemAttributePaths, makeDefaultRule, makeDefaultAttribute } from './factories.js';
 import { showSetHeadersPopover as _showSetHeadersPopover, showSplitColumnPopover as _showSplitColumnPopover, showCellEditPopover as _showCellEditPopover, showMultiCellEditPopover as _showMultiCellEditPopover } from './popovers.js';
 import { applyCellSelClasses, applyTestErrorClasses, applyOverrideClasses, bulkTransformColumn } from './cell-operations.js';
-import { buildPreviewSummary, buildAttributeList, enrichTextEntries, aggregateTextFonts } from './prepare-context.js';
-import { getPdfCoords, createRegionData, buildRegionOverlay, computeAutoRegions } from './planner.js';
+import { buildPreviewSummary, enrichTextEntries, aggregateTextFonts } from './prepare-context.js';
+import { getPdfCoords, createRegionData, buildRegionOverlay } from './planner.js';
 import { validateItems } from './validation.js';
 
 const { ApplicationV2, HandlebarsApplicationMixin } = foundry.applications.api;
@@ -46,14 +46,11 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       addAttribute:        DynamicItemBuilderApp.#addAttribute,
       deleteAttribute:     DynamicItemBuilderApp.#deleteAttribute,
       deleteRegion:        DynamicItemBuilderApp.#deleteRegion,
-      autoDetectRegions:   DynamicItemBuilderApp.#autoDetectRegions,
       buildItems:          DynamicItemBuilderApp.#buildItems,
       exportRules:         DynamicItemBuilderApp.#exportRules,
       importRules:         DynamicItemBuilderApp.#importRules,
       loadPdf:             DynamicItemBuilderApp.#loadPdfDialog,
       refreshPreview:      DynamicItemBuilderApp.#refreshPreview,
-      openAttributeMenu:   DynamicItemBuilderApp.#openAttributeMenu,
-      acceptSuggestion:    DynamicItemBuilderApp.#acceptSuggestion,
       linkAllSuggestions:  DynamicItemBuilderApp.#linkAllSuggestions,
       testRun:             DynamicItemBuilderApp.#testRun,
       addTextRule:         DynamicItemBuilderApp.#addTextRule,
@@ -63,7 +60,8 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       moveTextField:       DynamicItemBuilderApp.#moveTextField,
       addTextFieldRule:    DynamicItemBuilderApp.#addTextFieldRule,
       deleteTextFieldRule: DynamicItemBuilderApp.#deleteTextFieldRule,
-      moveTextFieldRule:   DynamicItemBuilderApp.#moveTextFieldRule
+      moveTextFieldRule:   DynamicItemBuilderApp.#moveTextFieldRule,
+      addPreviewColumn:    DynamicItemBuilderApp.#addPreviewColumn
     }
   };
 
@@ -94,6 +92,9 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
   _previewLoading = false;
 
+  /** @type {boolean} True when changes have been made since last preview refresh */
+  _previewDirty = false;
+
   /** @type {string|null} Global default destination folder for all rules */
   _selectedFolderId = null;
 
@@ -108,7 +109,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
   // ── Tab state ──────────────────────────────────────────────────────────────
 
-  /** @type {'planner'|'item-planner'} */
+  /** @type {'planner'} */
   _centerTab = 'planner';
 
   /** @type {'tables'|'preview'} */
@@ -186,8 +187,9 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       .sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0))
       .map(f => ({ id: f.id, name: '\u00a0'.repeat((f.depth ?? 0) * 2) + f.name }));
 
-    // Guard: removed tabs — fall back to tables
+    // Guard: removed tabs — fall back to defaults
     if (this._rightTab === 'suggested') this._rightTab = 'tables';
+    if (this._centerTab === 'item-planner') this._centerTab = 'planner';
 
     // Attribute link suggestions — computed from detected columns vs available paths
     const suggestions = rule && attributePaths.length && this._scanData
@@ -195,7 +197,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       : [];
 
     // Flat attribute list for the mapping UI (all system fields + orphan mappings)
-    const { attributeList, suggestionCount } = buildAttributeList(rule, attributePaths, suggestions);
+    const suggestionCount = suggestions.length;
 
     const textScanContext = this.#buildTextScanContext(rule);
     const textFontsJson   = JSON.stringify(textScanContext?.availableFonts ?? []);
@@ -212,13 +214,11 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       previewSummary,
       hasIgnoredItems,
       previewLoading:  this._previewLoading,
-      transforms:      TRANSFORMS,
       itemFolders,
       selectedFolderId: this._selectedFolderId,
       scanData:  enrichScanDataColumns(this._scanData, rule, suggestions),
       // Center panel tabs
       plannerTabActive:     this._centerTab === 'planner',
-      itemPlannerTabActive: this._centerTab === 'item-planner',
       plannerPage: this._plannerPage,
       drawMode:    this._drawMode,
       // Right panel tabs
@@ -233,9 +233,9 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       textScanContext,
       textFontsJson,
       // Attribute mapping list
-      attributeList,
       suggestionCount,
       previewHasContent: previewSummary.some(r => (r.items ?? []).length > 0),
+      previewDirty: this._previewDirty,
       // Planner page navigation — restrict to pages defined in rule
       plannerAtFirst: !this.#plannerPages().length || this._plannerPage <= this.#plannerPages()[0],
       plannerAtLast:  !this.#plannerPages().length || this._plannerPage >= this.#plannerPages()[this.#plannerPages().length - 1]
@@ -299,140 +299,8 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       this.#onEditorChange(e);
     });
 
-    // Attribute list changes
-    el.querySelector('.attributes-list')?.addEventListener('change', e => {
-      this.#onAttributeChange(e);
-    });
-
-    // ── PDF Planner ────────────────────────────────────────────────────────
-
-    // Page navigation — step only through pages defined in the rule
-    el.querySelector('[data-planner-nav="prev"]')?.addEventListener('click', () => {
-      const valid = this.#plannerPages();
-      const idx   = valid.indexOf(this._plannerPage);
-      if (idx > 0) { this._plannerPage = valid[idx - 1]; this.#renderPlannerCanvas(); this.#syncPlannerPageDisplay(); }
-    });
-    el.querySelector('[data-planner-nav="next"]')?.addEventListener('click', () => {
-      const valid = this.#plannerPages();
-      const idx   = valid.indexOf(this._plannerPage);
-      if (idx !== -1 && idx < valid.length - 1) { this._plannerPage = valid[idx + 1]; this.#renderPlannerCanvas(); this.#syncPlannerPageDisplay(); }
-    });
-
-    // Draw mode toggle buttons
-    el.querySelectorAll('[data-draw-mode]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const mode = btn.dataset.drawMode;
-        this._drawMode = this._drawMode === mode ? null : mode;
-        // Update button active states without full re-render
-        el.querySelectorAll('[data-draw-mode]').forEach(b => {
-          b.classList.toggle('active', b.dataset.drawMode === this._drawMode);
-        });
-        const wrap = el.querySelector('.dib-planner-canvas-wrap');
-        if (wrap) wrap.classList.toggle('draw-active', !!this._drawMode);
-      });
-    });
-
-    // Canvas drawing (mousedown on viewport to start rectangle)
-    const viewport = el.querySelector('.dib-pdf-viewport');
-    if (viewport) {
-      viewport.addEventListener('mousedown', e => this.#handlePlannerMousedown(e));
-    }
-
-    // Region sidebar: label + group + text region config field changes
-    el.querySelector('.dib-region-sidebar')?.addEventListener('change', e => {
-      const input = e.target.closest('[data-region-field]');
-      if (!input) return;
-      const id    = input.dataset.regionId;
-      const field = input.dataset.regionField;
-      const rule  = this.selectedRule;
-      const region = (rule?.regions ?? []).find(r => r.id === id);
-      if (!region) return;
-      // Checkboxes use .checked; selects and text inputs use .value
-      region[field] = input.type === 'checkbox' ? input.checked : input.value;
-      this.#schedulePreview();
-      this.#updateRegionOverlay();
-    });
-
-    // Legacy Name Rules inputs — update data only, no auto-refresh
-    el.querySelector('.dib-text-rules-section')?.addEventListener('input', e => {
-      const input = e.target.closest('.dib-text-rule-input');
-      if (!input) return;
-      const rule = this.selectedRule;
-      const tr = (rule?.textRules ?? []).find(r => r.id === input.dataset.textRuleId);
-      if (tr) tr.pattern = input.value;
-    });
-
-    // Field Rules: input changes (header, foundryAttr, rule patterns) — no auto-refresh
-    el.querySelector('.dib-field-rules-section')?.addEventListener('input', e => {
-      const rule = this.selectedRule;
-      if (!rule) return;
-      const fieldEl = e.target.closest('[data-field-id]');
-      if (!fieldEl) return;
-      const tf = (rule.textFields ?? []).find(f => f.id === fieldEl.dataset.fieldId);
-      if (!tf) return;
-      const prop = e.target.dataset.fieldProp;
-      if (prop === 'header')      { tf.header      = e.target.value; return; }
-      if (prop === 'foundryAttr') { tf.foundryAttr = e.target.value; return; }
-      // Rule pattern input inside this field — only when the target itself has data-rule-id
-      // (avoids picking up checkboxes/selects inside format rule rows whose ancestor has it)
-      if (e.target.dataset.ruleId) {
-        const tr = (tf.rules ?? []).find(r => r.id === e.target.dataset.ruleId);
-        if (tr) tr.pattern = e.target.value;
-      }
-    });
-
-    // Field Rules: font-target select changes (font size filters font name dropdown)
-    el.querySelector('.dib-field-rules-section')?.addEventListener('change', e => {
-      const rule     = this.selectedRule;
-      if (!rule) return;
-      const fieldEl  = e.target.closest('[data-field-id]');
-      const ruleEl   = e.target.closest('[data-rule-id]');
-      if (!fieldEl || !ruleEl) return;
-      const tf = (rule.textFields ?? []).find(f => f.id === fieldEl.dataset.fieldId);
-      const tr = (tf?.rules ?? []).find(r => r.id === ruleEl.dataset.ruleId);
-      if (!tr) return;
-
-      // Format rule: checkboxes and header select
-      if (tr.type === 'format') {
-        const prop = e.target.dataset.formatProp;
-        if (!prop) return;
-        tr[prop] = e.target.type === 'checkbox' ? e.target.checked
-                 : e.target.type === 'number'   ? Number(e.target.value)
-                 : e.target.value;
-        this.#schedulePreview();
-        return;
-      }
-
-      // Regex-target / target rule: group number input
-      if (tr.type === 'regex-target' || tr.type === 'target') {
-        if (e.target.dataset.ruleProp !== 'group') return;
-        tr.group = Number(e.target.value);
-        this.#schedulePreview();
-        return;
-      }
-
-      if (tr.type !== 'font-target') return;
-
-      if (e.target.classList.contains('dib-font-size-select')) {
-        tr.fontSize = e.target.value;
-        // Filter the adjacent font-name select options
-        const section   = e.target.closest('.dib-field-rules-section');
-        const allFonts  = JSON.parse(section?.dataset.fonts ?? '[]');
-        const nameSelect = ruleEl.querySelector('.dib-font-name-select');
-        if (nameSelect) {
-          const filtered = tr.fontSize === 'ALL'
-            ? [...new Set(allFonts.map(f => f.fontName))]
-            : [...new Set(allFonts.filter(f => String(f.fontSize) === tr.fontSize).map(f => f.fontName))];
-          // Reset to ALL if current selection is no longer valid
-          if (tr.fontName !== 'ALL' && !filtered.includes(tr.fontName)) tr.fontName = 'ALL';
-          nameSelect.innerHTML = '<option value="ALL">ALL</option>'
-            + filtered.map(n => `<option value="${n}"${n === tr.fontName ? ' selected' : ''}>${n}</option>`).join('');
-        }
-      } else if (e.target.classList.contains('dib-font-name-select')) {
-        tr.fontName = e.target.value;
-      }
-      this.#schedulePreview();
-    });
+    this.#bindPlannerEvents(el);
+    this.#bindFieldRuleEvents(el);
 
     // Text Preview: column header clicks
     el.querySelector('.dib-text-preview')?.addEventListener('click', e => {
@@ -481,9 +349,139 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       '.dib-sel-cell'
     );
 
-    // Column-cell drag selection (mousedown to support drag-range)
+    this.#bindPreviewCellEvents(el);
+  }
+
+  /** PDF Planner events: page nav, draw mode, canvas drawing, region sidebar */
+  #bindPlannerEvents(el) {
+    // Page navigation — step only through pages defined in the rule
+    el.querySelector('[data-planner-nav="prev"]')?.addEventListener('click', () => {
+      const valid = this.#plannerPages();
+      const idx   = valid.indexOf(this._plannerPage);
+      if (idx > 0) { this._plannerPage = valid[idx - 1]; this.#renderPlannerCanvas(); this.#syncPlannerPageDisplay(); }
+    });
+    el.querySelector('[data-planner-nav="next"]')?.addEventListener('click', () => {
+      const valid = this.#plannerPages();
+      const idx   = valid.indexOf(this._plannerPage);
+      if (idx !== -1 && idx < valid.length - 1) { this._plannerPage = valid[idx + 1]; this.#renderPlannerCanvas(); this.#syncPlannerPageDisplay(); }
+    });
+
+    // Draw mode toggle buttons
+    el.querySelectorAll('[data-draw-mode]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const mode = btn.dataset.drawMode;
+        this._drawMode = this._drawMode === mode ? null : mode;
+        el.querySelectorAll('[data-draw-mode]').forEach(b => {
+          b.classList.toggle('active', b.dataset.drawMode === this._drawMode);
+        });
+        const wrap = el.querySelector('.dib-planner-canvas-wrap');
+        if (wrap) wrap.classList.toggle('draw-active', !!this._drawMode);
+      });
+    });
+
+    // Canvas drawing (mousedown on viewport to start rectangle)
+    el.querySelector('.dib-pdf-viewport')?.addEventListener('mousedown', e => this.#handlePlannerMousedown(e));
+
+    // Region sidebar: label + group + text region config field changes
+    el.querySelector('.dib-region-sidebar')?.addEventListener('change', e => {
+      const input = e.target.closest('[data-region-field]');
+      if (!input) return;
+      const id    = input.dataset.regionId;
+      const field = input.dataset.regionField;
+      const rule  = this.selectedRule;
+      const region = (rule?.regions ?? []).find(r => r.id === id);
+      if (!region) return;
+      region[field] = input.type === 'checkbox' ? input.checked : input.value;
+      this.#schedulePreview();
+      this.#updateRegionOverlay();
+    });
+  }
+
+  /** Field rule events: legacy text rules, text field inputs, font-target selects */
+  #bindFieldRuleEvents(el) {
+    // Legacy Name Rules inputs — update data only, no auto-refresh
+    el.querySelector('.dib-text-rules-section')?.addEventListener('input', e => {
+      const input = e.target.closest('.dib-text-rule-input');
+      if (!input) return;
+      const rule = this.selectedRule;
+      const tr = (rule?.textRules ?? []).find(r => r.id === input.dataset.textRuleId);
+      if (tr) tr.pattern = input.value;
+    });
+
+    // Field Rules: input changes (header, foundryAttr, rule patterns) — no auto-refresh
+    el.querySelector('.dib-field-rules-section')?.addEventListener('input', e => {
+      const rule = this.selectedRule;
+      if (!rule) return;
+      const fieldEl = e.target.closest('[data-field-id]');
+      if (!fieldEl) return;
+      const tf = (rule.textFields ?? []).find(f => f.id === fieldEl.dataset.fieldId);
+      if (!tf) return;
+      const prop = e.target.dataset.fieldProp;
+      if (prop === 'header')      { tf.header      = e.target.value; return; }
+      if (prop === 'foundryAttr') { tf.foundryAttr = e.target.value; return; }
+      if (e.target.dataset.ruleId) {
+        const tr = (tf.rules ?? []).find(r => r.id === e.target.dataset.ruleId);
+        if (tr) tr.pattern = e.target.value;
+      }
+    });
+
+    // Field Rules: font-target select changes (font size filters font name dropdown)
+    el.querySelector('.dib-field-rules-section')?.addEventListener('change', e => {
+      const rule     = this.selectedRule;
+      if (!rule) return;
+      const fieldEl  = e.target.closest('[data-field-id]');
+      const ruleEl   = e.target.closest('[data-rule-id]');
+      if (!fieldEl || !ruleEl) return;
+      const tf = (rule.textFields ?? []).find(f => f.id === fieldEl.dataset.fieldId);
+      const tr = (tf?.rules ?? []).find(r => r.id === ruleEl.dataset.ruleId);
+      if (!tr) return;
+
+      if (tr.type === 'format') {
+        const prop = e.target.dataset.formatProp;
+        if (!prop) return;
+        tr[prop] = e.target.type === 'checkbox' ? e.target.checked
+                 : e.target.type === 'number'   ? Number(e.target.value)
+                 : e.target.value;
+        this.#schedulePreview();
+        return;
+      }
+
+      if (tr.type === 'regex-target' || tr.type === 'target') {
+        if (e.target.dataset.ruleProp !== 'group') return;
+        tr.group = Number(e.target.value);
+        this.#schedulePreview();
+        return;
+      }
+
+      if (tr.type !== 'font-target') return;
+
+      if (e.target.classList.contains('dib-font-size-select')) {
+        tr.fontSize = e.target.value;
+        const section   = e.target.closest('.dib-field-rules-section');
+        const allFonts  = JSON.parse(section?.dataset.fonts ?? '[]');
+        const nameSelect = ruleEl.querySelector('.dib-font-name-select');
+        if (nameSelect) {
+          const filtered = tr.fontSize === 'ALL'
+            ? [...new Set(allFonts.map(f => f.fontName))]
+            : [...new Set(allFonts.filter(f => String(f.fontSize) === tr.fontSize).map(f => f.fontName))];
+          if (tr.fontName !== 'ALL' && !filtered.includes(tr.fontName)) tr.fontName = 'ALL';
+          nameSelect.innerHTML = '<option value="ALL">ALL</option>'
+            + filtered.map(n => `<option value="${n}"${n === tr.fontName ? ' selected' : ''}>${n}</option>`).join('');
+        }
+      } else if (e.target.classList.contains('dib-font-name-select')) {
+        tr.fontName = e.target.value;
+      }
+      this.#schedulePreview();
+    });
+  }
+
+  /** Item Preview cell interactions: drag-select, column header menu, cell context menu */
+  #bindPreviewCellEvents(el) {
     const previewList = el.querySelector('.preview-list');
-    previewList?.addEventListener('mousedown', e => {
+    if (!previewList) return;
+
+    // Column-cell drag selection (mousedown to support drag-range)
+    previewList.addEventListener('mousedown', e => {
       if (e.button !== 0) return;
       const td = e.target.closest('.preview-td');
       if (!td) return;
@@ -546,18 +544,13 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       this.#applyCellSelClasses();
     });
 
-    // Column header menu + per-cell context menu in Item Preview
-    previewList?.addEventListener('click', e => {
-      // Always eat the click that follows a drag regardless of where mouse was released
+    // Column header menu + per-cell context menu
+    previewList.addEventListener('click', e => {
       if (this._wasCellDrag) { this._wasCellDrag = false; return; }
       const th = e.target.closest('.preview-th');
       if (th) { this.#showColumnMenu(e, th); return; }
       const td = e.target.closest('.preview-td');
-      if (td) {
-        this.#showCellMenu(e, td);
-        return;
-      }
-      // Clicked outside any cell — clear column selection
+      if (td) { this.#showCellMenu(e, td); return; }
       if (this._cellSel.length > 0) {
         this._cellSel = []; this._cellSelField = null; this._cellSelRuleId = null;
         this.#applyCellSelClasses();
@@ -847,25 +840,13 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     this.#schedulePreview();
   }
 
-  #onAttributeChange(event) {
-    const rule = this.selectedRule;
-    if (!rule) return;
-    const idx  = Number(event.target.closest('[data-attr-index]')?.dataset.attrIndex);
-    if (isNaN(idx)) return;
-    const field = event.target.dataset.field;
-    if (!field) return;
-    const raw   = event.target.value;
-    const value = event.target.type === 'number' ? (raw === '' ? null : Number(raw)) : raw;
-    rule.attributes[idx][field] = value;
-    this.#schedulePreview();
-  }
-
   // -------------------------------------------------------------------------
   // Preview
   // -------------------------------------------------------------------------
 
   #schedulePreview() {
     clearTimeout(this._debounceTimer);
+    this._previewDirty = true;
     this._debounceTimer = setTimeout(() => this.#runPreview(), 900);
   }
 
@@ -896,6 +877,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     }
 
     this._previewLoading = false;
+    this._previewDirty = false;
     this.render();
   }
 
@@ -1067,24 +1049,17 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     }
 
     // Link Attribute
-    if (this._cachedAttributePaths?.length) {
+    appendAttributeMappingMenu(menuItems, tf.header || 'field', this._cachedAttributePaths, (path) => {
+      tf.foundryAttr = path;
+      this.#schedulePreviewAndRender();
+    });
+    if (tf.foundryAttr) {
       menuItems.push({ separator: true });
-      menuItems.push({ heading: `Map "${tf.header || 'field'}" to attribute:` });
-      menuItems.push({ filterInput: true });
-      for (const attr of this._cachedAttributePaths) {
-        menuItems.push({
-          icon: 'fa-database', label: attr.path, filterable: true,
-          action: () => { tf.foundryAttr = attr.path; this.#schedulePreviewAndRender(); }
-        });
-      }
-      if (tf.foundryAttr) {
-        menuItems.push({ separator: true });
-        menuItems.push({
-          icon: 'fa-times',
-          label: 'Clear attribute mapping',
-          action: () => { tf.foundryAttr = ''; this.render(); }
-        });
-      }
+      menuItems.push({
+        icon: 'fa-times',
+        label: 'Clear attribute mapping',
+        action: () => { tf.foundryAttr = ''; this.render(); }
+      });
     }
 
     this.#showContextMenu(event, menuItems);
@@ -1220,101 +1195,103 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     const menuItems = [];
     const col = (headerCell ?? dataCell)?.dataset.column;
 
-    if (headerCell) {
-      const tableId = headerCell.dataset.tableId;
-      menuItems.push({
-        icon: 'fa-heading',
-        label: `Set Header Pattern: "${col}"`,
-        action: () => { rule.headerPattern = col; this.#schedulePreviewAndRender(); }
+    if (headerCell) this.#buildHeaderCellMenu(menuItems, event, rule, col, headerCell.dataset.tableId);
+    if (dataCell)   this.#buildDataCellMenu(menuItems, rule, dataCell.dataset.value);
+    if (proseBlock) this.#buildProseCellMenu(menuItems, rule, proseBlock.dataset.text);
+    if (col) {
+      appendAttributeMappingMenu(menuItems, col, this._cachedAttributePaths, (path) => {
+        this.#mapColumnToField(rule, col, path);
+        this.render();
       });
-      const hasSplit = rule.columnSplits?.[tableId]?.[col];
-      menuItems.push({
-        icon: 'fa-columns',
-        label: hasSplit ? `Edit Split: "${col}" (on "${hasSplit}")` : `Split Column: "${col}"`,
-        action: () => this.#showSplitColumnPopover(event, tableId, col)
-      });
-      if (hasSplit) {
-        menuItems.push({
-          icon: 'fa-times',
-          label: `Remove Split: "${col}"`,
-          action: () => {
-            delete rule.columnSplits[tableId][col];
-            if (!Object.keys(rule.columnSplits[tableId]).length) delete rule.columnSplits[tableId];
-            this.#schedulePreview();
-          }
-        });
-      }
-      const table   = this._scanData?.tables?.find(t => t.id === tableId);
-      const colIdx  = table?.columns.findIndex(c => c.header === col) ?? -1;
-      const nextCol = colIdx >= 0 && colIdx < (table.columns.length - 1) ? table.columns[colIdx + 1].header : null;
-      const hasMerge = rule.columnMerges?.[tableId]?.some(([a, b]) => {
-        return a === col || b === col || [a, b].filter(h => h.trim()).join(' ') === col;
-      });
-      if (nextCol !== null) {
-        menuItems.push({
-          icon: 'fa-compress-alt',
-          label: `Merge "${col || '(unlabeled)'}" → "${nextCol || '(unlabeled)'}"`,
-          action: () => {
-            if (!rule.columnMerges) rule.columnMerges = {};
-            if (!rule.columnMerges[tableId]) rule.columnMerges[tableId] = [];
-            rule.columnMerges[tableId].push([col, nextCol]);
-            this.#schedulePreview();
-          }
-        });
-      }
-      if (hasMerge) {
-        menuItems.push({
-          icon: 'fa-expand-alt',
-          label: `Remove Merge: "${col || '(unlabeled)'}"`,
-          action: () => {
-            rule.columnMerges[tableId] = rule.columnMerges[tableId].filter(([a, b]) => {
-              return a !== col && b !== col && [a, b].filter(h => h.trim()).join(' ') !== col;
-            });
-            if (!rule.columnMerges[tableId].length) delete rule.columnMerges[tableId];
-            this.#schedulePreview();
-          }
-        });
-      }
-    }
-    if (dataCell) {
-      const val = dataCell.dataset.value;
-      menuItems.push({
-        icon: 'fa-ban',
-        label: `Add to Skip Pattern: "${val}"`,
-        action: () => {
-          rule.skipPattern = rule.skipPattern ? `${rule.skipPattern}|${escapeRegex(val)}` : escapeRegex(val);
-          this.#schedulePreviewAndRender();
-        }
-      });
-      menuItems.push({
-        icon: 'fa-flag',
-        label: `Set as Item Start Pattern`,
-        action: () => { rule.rowDetectionPattern = `^${escapeRegex(val)}`; this.#schedulePreviewAndRender(); }
-      });
-    }
-    if (proseBlock) {
-      const text = proseBlock.dataset.text?.slice(0, 40);
-      menuItems.push({
-        icon: 'fa-flag',
-        label: `Set as Item Start Pattern: "${text}…"`,
-        action: () => {
-          rule.rowDetectionPattern = escapeRegex(proseBlock.dataset.text.split(' ')[0]);
-          this.#schedulePreviewAndRender();
-        }
-      });
-    }
-    if (col && this._cachedAttributePaths.length) {
-      menuItems.push({ separator: true });
-      menuItems.push({ heading: `Map column "${col}" to field:` });
-      menuItems.push({ filterInput: true });
-      for (const attr of this._cachedAttributePaths) {
-        menuItems.push({
-          icon: 'fa-link', label: attr.path, filterable: true,
-          action: () => { this.#mapColumnToField(rule, col, attr.path); this.render(); }
-        });
-      }
     }
     this.#showContextMenu(event, menuItems);
+  }
+
+  /** Header cell context menu items: header pattern, split, merge */
+  #buildHeaderCellMenu(menuItems, event, rule, col, tableId) {
+    menuItems.push({
+      icon: 'fa-heading',
+      label: `Set Header Pattern: "${col}"`,
+      action: () => { rule.headerPattern = col; this.#schedulePreviewAndRender(); }
+    });
+    const hasSplit = rule.columnSplits?.[tableId]?.[col];
+    menuItems.push({
+      icon: 'fa-columns',
+      label: hasSplit ? `Edit Split: "${col}" (on "${hasSplit}")` : `Split Column: "${col}"`,
+      action: () => this.#showSplitColumnPopover(event, tableId, col)
+    });
+    if (hasSplit) {
+      menuItems.push({
+        icon: 'fa-times',
+        label: `Remove Split: "${col}"`,
+        action: () => {
+          delete rule.columnSplits[tableId][col];
+          if (!Object.keys(rule.columnSplits[tableId]).length) delete rule.columnSplits[tableId];
+          this.#schedulePreview();
+        }
+      });
+    }
+    const table   = this._scanData?.tables?.find(t => t.id === tableId);
+    const colIdx  = table?.columns.findIndex(c => c.header === col) ?? -1;
+    const nextCol = colIdx >= 0 && colIdx < (table.columns.length - 1) ? table.columns[colIdx + 1].header : null;
+    const hasMerge = rule.columnMerges?.[tableId]?.some(([a, b]) => {
+      return a === col || b === col || [a, b].filter(h => h.trim()).join(' ') === col;
+    });
+    if (nextCol !== null) {
+      menuItems.push({
+        icon: 'fa-compress-alt',
+        label: `Merge "${col || '(unlabeled)'}" → "${nextCol || '(unlabeled)'}"`,
+        action: () => {
+          if (!rule.columnMerges) rule.columnMerges = {};
+          if (!rule.columnMerges[tableId]) rule.columnMerges[tableId] = [];
+          rule.columnMerges[tableId].push([col, nextCol]);
+          this.#schedulePreview();
+        }
+      });
+    }
+    if (hasMerge) {
+      menuItems.push({
+        icon: 'fa-expand-alt',
+        label: `Remove Merge: "${col || '(unlabeled)'}"`,
+        action: () => {
+          rule.columnMerges[tableId] = rule.columnMerges[tableId].filter(([a, b]) => {
+            return a !== col && b !== col && [a, b].filter(h => h.trim()).join(' ') !== col;
+          });
+          if (!rule.columnMerges[tableId].length) delete rule.columnMerges[tableId];
+          this.#schedulePreview();
+        }
+      });
+    }
+  }
+
+  /** Data cell context menu items: skip pattern, item start pattern */
+  #buildDataCellMenu(menuItems, rule, val) {
+    menuItems.push({
+      icon: 'fa-ban',
+      label: `Add to Skip Pattern: "${val}"`,
+      action: () => {
+        rule.skipPattern = rule.skipPattern ? `${rule.skipPattern}|${escapeRegex(val)}` : escapeRegex(val);
+        this.#schedulePreviewAndRender();
+      }
+    });
+    menuItems.push({
+      icon: 'fa-flag',
+      label: `Set as Item Start Pattern`,
+      action: () => { rule.rowDetectionPattern = `^${escapeRegex(val)}`; this.#schedulePreviewAndRender(); }
+    });
+  }
+
+  /** Prose block context menu items: item start pattern */
+  #buildProseCellMenu(menuItems, rule, text) {
+    const preview = text?.slice(0, 40);
+    menuItems.push({
+      icon: 'fa-flag',
+      label: `Set as Item Start Pattern: "${preview}…"`,
+      action: () => {
+        rule.rowDetectionPattern = escapeRegex(text.split(' ')[0]);
+        this.#schedulePreviewAndRender();
+      }
+    });
   }
 
   #showSetHeadersPopover(event, tableId) {
@@ -1620,35 +1597,6 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     this.render();
   }
 
-  static async #autoDetectRegions() {
-    const rule = this.selectedRule;
-    if (!this._pdf || !rule?.pages) {
-      ui.notifications.warn('Load a PDF and set a page range first.');
-      return;
-    }
-    try {
-      const pageNums = parsePageString(rule.pages, this._pdf.numPages);
-      const pages    = await extractPages(this._pdf, pageNums);
-      const allItems = mergePageItems(pages);
-      const result   = detectTables(allItems);
-
-      rule.regions ??= [];
-      const existingCount = rule.regions.filter(r => r.type === 'table').length;
-      const newRegions = computeAutoRegions(result.tables, allItems, pageNums, existingCount);
-      rule.regions.push(...newRegions);
-
-      if (newRegions.length) {
-        ui.notifications.info(`Auto-detected ${newRegions.length} table region(s).`);
-        this.render();
-      } else {
-        ui.notifications.warn('No tables detected. Try drawing regions manually.');
-      }
-    } catch (err) {
-      ui.notifications.error(`Auto-detect failed: ${err.message}`);
-      console.error(err);
-    }
-  }
-
   static async #refreshPreview() {
     await this.#runPreview();
   }
@@ -1688,68 +1636,6 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     this.render();
   }
 
-  // ── Attribute mapping actions ────────────────────────────────────────────
-
-  static async #openAttributeMenu(event, target) {
-    const foundryField = target.dataset.foundryField;
-    const rule = this.selectedRule;
-    if (!rule || !foundryField) return;
-
-    const mapping  = rule.attributes.find(a => a.foundryField === foundryField && a.columnHeader);
-    const inPreview = (rule.manualColumns ?? []).includes(foundryField);
-    const menuItems = [
-      {
-        icon: 'fa-search',
-        label: 'Inspect / Edit Mapping',
-        action: () => this.#showAttributeDialog(foundryField)
-      }
-    ];
-    if (mapping) {
-      menuItems.push({
-        icon: 'fa-unlink',
-        label: `Remove Link  (${mapping.columnHeader})`,
-        action: () => {
-          rule.attributes = rule.attributes.filter(
-            a => !(a.foundryField === foundryField && a.columnHeader === mapping.columnHeader)
-          );
-          this.#schedulePreview();
-          this.render();
-        }
-      });
-    } else if (inPreview) {
-      menuItems.push({
-        icon: 'fa-eye-slash',
-        label: 'Remove from Preview',
-        action: () => {
-          rule.manualColumns = (rule.manualColumns ?? []).filter(p => p !== foundryField);
-          this.render();
-        }
-      });
-    } else {
-      menuItems.push({
-        icon: 'fa-eye',
-        label: 'Add to Preview',
-        action: () => {
-          rule.manualColumns = [...(rule.manualColumns ?? []), foundryField];
-          this.render();
-        }
-      });
-    }
-    this.#showContextMenu(event, menuItems);
-  }
-
-  static async #acceptSuggestion(event, target) {
-    const rule   = this.selectedRule;
-    const header = target.dataset.columnHeader;
-    const field  = target.dataset.suggestedField;
-    if (!rule || !header || !field) return;
-    if (!rule.attributes.some(a => a.columnHeader === header && a.foundryField === field)) {
-      rule.attributes.push({ ...makeDefaultAttribute(), columnHeader: header, foundryField: field });
-      this.#schedulePreview();
-      this.render();
-    }
-  }
-
   static async #linkAllSuggestions(event, target) {
     const rule = this.selectedRule;
     if (!rule || !this._scanData) return;
@@ -1766,67 +1652,31 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     if (added > 0) { this.#schedulePreviewAndRender(); }
   }
 
-  async #showAttributeDialog(foundryField) {
-    const rule = this.selectedRule;
+  static async #addPreviewColumn(event, target) {
+    const ruleId = target.closest('[data-rule-id]')?.dataset.ruleId;
+    const rule = this._rules.find(r => r.id === ruleId);
     if (!rule) return;
-
-    const existing = rule.attributes.find(a => a.foundryField === foundryField && a.columnHeader);
-    const columns  = [...new Set(
-      this._scanData?.tables?.flatMap(t => t.columns.map(c => c.header)).filter(h => h) ?? []
-    )];
-
-    const colOpts = columns.map(h =>
-      `<option value="${h.replace(/"/g, '&quot;')}"${existing?.columnHeader === h ? ' selected' : ''}>${h}</option>`
-    ).join('');
-    const txOpts = [
-      ['trim','Trim whitespace'], ['number','Number'], ['lowercase','Lowercase'],
-      ['uppercase','Uppercase'],  ['boolean','Boolean (yes/true/1/x)']
-    ].map(([v, l]) =>
-      `<option value="${v}"${(existing?.transform ?? 'trim') === v ? ' selected' : ''}>${l}</option>`
-    ).join('');
-
-    const content = `
-      <div style="display:flex;flex-direction:column;gap:10px;padding:4px 0">
-        <div>
-          <div style="font-size:0.75em;color:#9494a0;margin-bottom:2px">Foundry Field</div>
-          <div style="font-family:monospace;font-size:0.9em;color:#7ab0d4">${foundryField}</div>
-        </div>
-        <div>
-          <label style="display:block;font-size:0.8em;color:#9494a0;margin-bottom:3px">Column Header</label>
-          <select id="dib-dlg-col" style="width:100%">
-            <option value="">— Remove mapping —</option>
-            ${colOpts}
-          </select>
-        </div>
-        <div>
-          <label style="display:block;font-size:0.8em;color:#9494a0;margin-bottom:3px">Transform</label>
-          <select id="dib-dlg-tx" style="width:100%">${txOpts}</select>
-        </div>
-      </div>`;
-
-    const result = await foundry.applications.api.DialogV2.prompt({
-      window: { title: `Map: ${foundryField.split('.').pop()}` },
-      content,
-      ok: {
-        label: 'Save',
-        callback: (_e, _btn, dlg) => ({
-          column:    dlg.element.querySelector('#dib-dlg-col').value,
-          transform: dlg.element.querySelector('#dib-dlg-tx').value
-        })
-      },
-      rejectClose: false
-    });
-    if (!result) return;
-
-    rule.attributes = rule.attributes.filter(a => a.foundryField !== foundryField);
-    if (result.column) {
-      rule.attributes.push({
-        ...makeDefaultAttribute(), foundryField,
-        columnHeader: result.column, transform: result.transform
+    const linkedFields = new Set([
+      ...rule.attributes.filter(a => a.foundryField).map(a => a.foundryField),
+      ...(rule.manualColumns ?? []),
+      ...(rule.textFields ?? []).filter(f => f.foundryAttr).map(f => f.foundryAttr)
+    ]);
+    const available = (this._cachedAttributePaths ?? []).filter(a => !linkedFields.has(a.path));
+    if (!available.length) { ui.notifications.info('All attributes are already mapped or visible.'); return; }
+    const menuItems = [
+      { heading: 'Add column to preview:' },
+      { filterInput: true }
+    ];
+    for (const attr of available) {
+      menuItems.push({
+        icon: 'fa-plus', label: attr.path, filterable: true,
+        action: () => {
+          rule.manualColumns = [...(rule.manualColumns ?? []), attr.path];
+          this.render();
+        }
       });
     }
-    this.#schedulePreview();
-    this.render();
+    this.#showContextMenu(event, menuItems);
   }
 
   static async #buildItems() {
