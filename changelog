@@ -1,3 +1,13 @@
+# v1.2.1
+
+## Code Refactor
+No feature releases. This constitutes a code refactor to help keep things organized and maintainable.
+
+## Minor
+- Removed Item Planner, functionality added to Table Preview /  Item Preview
+- Removed Auto-Detect (it was bad, couldn't get it working consistently)
+
+
 # v1.2.0
 
 ## Major

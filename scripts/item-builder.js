@@ -2,6 +2,8 @@
  * Item Builder — takes parsed item data and creates Foundry Item documents.
  */
 
+import { setNestedValue } from './utils.js';
+
 /**
  * Create Foundry Items from an array of parsed attribute objects.
  *
@@ -40,16 +42,3 @@ export async function buildItems(parsedItems, itemType, folder = null) {
   return Item.createDocuments(itemsData);
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function setNestedValue(obj, path, value) {
-  const parts = path.split('.');
-  let cur = obj;
-  for (let i = 0; i < parts.length - 1; i++) {
-    if (typeof cur[parts[i]] !== 'object' || cur[parts[i]] === null) cur[parts[i]] = {};
-    cur = cur[parts[i]];
-  }
-  cur[parts[parts.length - 1]] = value;
-}

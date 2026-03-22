@@ -1,3 +1,5 @@
+import { safeRegex, escapeRegex, escapeHtml } from './utils.js';
+
 /**
  * PDF Parser — loads PDF.js from CDN and provides text extraction utilities.
  *
@@ -159,6 +161,56 @@ export async function extractPages(pdfDoc, pageNums) {
  * @param {number} pageGap  extra spacing to insert between pages (PDF units)
  * @returns {Array}  flat array of text items with globally-unique Y values
  */
+/**
+ * Filter a page's text items to those inside a region bounding box.
+ * @param {Object[]} items    array of PDF text items (each with x, y)
+ * @param {Object}   region   { x, y, w, h }
+ * @returns {Object[]}
+ */
+export function filterItemsToRegion(items, region) {
+  return items.filter(item =>
+    item.x >= region.x            &&
+    item.x <= region.x + region.w &&
+    item.y >= region.y            &&
+    item.y <= region.y + region.h
+  );
+}
+
+/**
+ * Collect text items from multiple table regions into a single pool,
+ * then run table detection on the combined result.
+ *
+ * Regions are sorted by page then Y position.  Items from successive
+ * regions receive a cumulative Y offset so they appear as one continuous
+ * stream to the table detector.
+ *
+ * @param {Object[]} pages    return value of extractPages()
+ * @param {Object[]} regions  table region descriptors ({ page, x, y, w, h })
+ * @returns {{ tables: Object[], proseRows: Object[] }}
+ */
+export function collectTableRegionItems(pages, regions) {
+  const sorted = [...regions].sort((a, b) => a.page - b.page || a.y - b.y);
+  let yOffset  = 0;
+  const allItems = [];
+
+  for (const region of sorted) {
+    const page = pages.find(p => p.pageNum === region.page);
+    if (!page) continue;
+    const regionItems = filterItemsToRegion(page.items, region);
+    for (const item of regionItems) {
+      allItems.push({ ...item, y: item.y + yOffset });
+    }
+    if (regionItems.length) {
+      yOffset += Math.max(...regionItems.map(i => i.y)) + 50;
+    }
+  }
+
+  if (!allItems.length) return { tables: [], proseRows: [] };
+  const result = detectTables(allItems);
+  result.tables.forEach((t, i) => { t.id = `tbl-${i}`; });
+  return result;
+}
+
 export function mergePageItems(pages, pageGap = 50) {
   let yOffset = 0;
   const allItems = [];
@@ -635,9 +687,6 @@ function addOrphanColumns(columns, dataRows) {
   return allCols.sort((a, b) => a.x - b.x).map((c, i) => ({ ...c, index: i }));
 }
 
-function escapeRegex(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 /**
  * Given a set of rows and column descriptors, map each row's text items
@@ -737,7 +786,7 @@ function isHeadingItem(item, medianFontSize, rowBodyFont) {
  */
 export function parseDescriptionBlock(items, config = {}) {
   const { namePattern, useFont = true } = config;
-  const nameRe = namePattern?.trim() ? safeRegexText(namePattern, 'i') : null;
+  const nameRe = namePattern?.trim() ? safeRegex(namePattern, 'i') : null;
 
   const rows = groupIntoRows(items);
   if (!rows.length) return [];
@@ -832,10 +881,6 @@ export function parseDescriptionBlock(items, config = {}) {
 }
 
 
-// Regex helper local to text parsing (avoids coupling with rule-engine.js)
-function safeRegexText(pattern, flags = '') {
-  try { return new RegExp(pattern, flags); } catch { return null; }
-}
 
 /**
  * Apply strip rules to an array of parsed text entries in-place.
@@ -886,6 +931,31 @@ export function extractRegionFonts(items) {
     .sort((a, b) => b.fontSize - a.fontSize || a.fontName.localeCompare(b.fontName));
 }
 
+/**
+ * Parse a text region's items using the appropriate strategy.
+ * Uses parseTextFields() when rule.textFields are defined (field-based path),
+ * otherwise falls back to parseDescriptionBlock() with strip rules (legacy path).
+ *
+ * @param {Array} regionItems  — pre-filtered items within the region bounds
+ * @param {Object} rule        — the full rule object
+ * @returns {Array}  parsed entries
+ */
+export function parseTextRegion(regionItems, rule) {
+  const textFields = rule.textFields?.length ? rule.textFields : null;
+  if (textFields) {
+    return parseTextFields(regionItems, textFields);
+  }
+  const textRules   = rule.textRules ?? [];
+  const namePattern = textRules
+    .filter(r => r.type === 'target' && r.pattern?.trim())
+    .map(r => r.pattern.trim())
+    .join('|') || undefined;
+  const stripRules  = textRules.filter(r => r.type === 'strip' && r.pattern?.trim());
+  const entries = parseDescriptionBlock(regionItems, { namePattern, useFont: true });
+  applyStripRules(entries, stripRules);
+  return entries;
+}
+
 export function parseTextFields(items, fields) {
   if (!fields?.length || !items?.length) return [];
 
@@ -911,7 +981,7 @@ export function parseTextFields(items, fields) {
     const patterns = (field.rules ?? [])
       .filter(r => (r.type === 'regex-target' || r.type === 'target') && r.pattern?.trim())
       .map(r => r.pattern.trim());
-    const re = patterns.length ? safeRegexText(patterns.join('|'), 'i') : null;
+    const re = patterns.length ? safeRegex(patterns.join('|'), 'i') : null;
     if (!fontRules.length && !re) return null;
     return (row) => {
       for (const fr of fontRules) {
@@ -977,7 +1047,7 @@ function _extractTextFieldValues(block, fields, boundaryField, catchAll, buildMa
       let matched  = null;
       let groupIdx = 0;
       for (const tr of targetRules) {
-        const re = safeRegexText(tr.pattern.trim(), 'i');
+        const re = safeRegex(tr.pattern.trim(), 'i');
         if (!re) continue;
         const m = re.exec(firstText);
         if (m) { matched = m; groupIdx = Number(tr.group ?? 0); break; }
@@ -1008,7 +1078,7 @@ function _extractTextFieldValues(block, fields, boundaryField, catchAll, buildMa
         if (groupRules.length) {
           rawValue = claimed.map(r => {
             for (const tr of groupRules) {
-              const re = safeRegexText(tr.pattern.trim(), 'i');
+              const re = safeRegex(tr.pattern.trim(), 'i');
               if (!re) continue;
               const m = re.exec(r.text);
               if (m) return m[Number(tr.group)] ?? r.text;
@@ -1040,14 +1110,6 @@ function _applyFieldStrips(text, rules) {
     try { text = text.replace(new RegExp(rule.pattern, 'gi'), '').trim(); } catch { /* skip */ }
   }
   return text.trim();
-}
-
-function escapeHtml(str) {
-  return String(str ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }
 
 /**
