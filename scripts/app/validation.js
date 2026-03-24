@@ -41,11 +41,13 @@ export function validateItems(rules, preview, cellOverrides, ItemClass) {
         else doc[field] = value;
       }
 
-      // Test: construct in memory — triggers DataModel schema validation
+      // Test: construct in memory — triggers DataModel schema validation.
+      // Deep-clone doc so Foundry's DataModel type-coercion (e.g. "3 gp" → NaN)
+      // cannot mutate the shared parsed item data and corrupt the preview.
       let rowError = null;
       let fieldErrors = {};
       try {
-        new ItemClass(doc, { parent: null });
+        new ItemClass(foundry.utils.deepClone(doc), { parent: null });
       } catch (err) {
         rowError = err.message ?? String(err);
         // DataModelValidationError exposes per-field errors

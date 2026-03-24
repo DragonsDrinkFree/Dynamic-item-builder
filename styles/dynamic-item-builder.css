@@ -1538,6 +1538,43 @@ div.ignore-tr {
   font-size: 12px !important;
   padding: 3px 6px !important;
 }
+/* ── Find & Replace popover ── */
+.dib-findreplace-popover {
+  min-width: 260px;
+}
+.dib-fr-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dib-fr-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--dib-text-muted);
+  width: 48px;
+  flex-shrink: 0;
+}
+.dib-fr-options {
+  display: flex;
+  gap: 12px;
+  margin-top: 2px;
+}
+.dib-fr-check {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--dib-text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+.dib-fr-error {
+  font-size: 10px;
+  color: #c44;
+  min-height: 0;
+}
 /* Set Headers button in scan table label */
 .scan-table-label {
   display: flex;

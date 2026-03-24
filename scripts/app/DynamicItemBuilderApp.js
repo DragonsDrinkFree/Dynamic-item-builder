@@ -18,13 +18,15 @@ import { escapeRegex } from '../utils.js';
 import { showContextMenu, appendAttributeMappingMenu } from './context-menu.js';
 import { computeSuggestionsForRule, enrichScanDataColumns } from './suggestions.js';
 import { getSystemItemTypes, getItemAttributePaths, makeDefaultRule, makeDefaultAttribute } from './factories.js';
-import { showSetHeadersPopover as _showSetHeadersPopover, showSplitColumnPopover as _showSplitColumnPopover, showCellEditPopover as _showCellEditPopover, showMultiCellEditPopover as _showMultiCellEditPopover } from './popovers.js';
+import { showSetHeadersPopover as _showSetHeadersPopover, showSplitColumnPopover as _showSplitColumnPopover, showCellEditPopover as _showCellEditPopover, showMultiCellEditPopover as _showMultiCellEditPopover, showFindReplacePopover as _showFindReplacePopover } from './popovers.js';
 import { applyCellSelClasses, applyTestErrorClasses, applyOverrideClasses, bulkTransformColumn } from './cell-operations.js';
 import { buildPreviewSummary, enrichTextEntries, aggregateTextFonts } from './prepare-context.js';
 import { getPdfCoords, createRegionData, buildRegionOverlay } from './planner.js';
 import { validateItems } from './validation.js';
 
 const { ApplicationV2, HandlebarsApplicationMixin } = foundry.applications.api;
+
+const RULES_SCHEMA_VERSION = 1;
 
 export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
@@ -1262,6 +1264,23 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         }
       });
     }
+
+    const linkedAttrs = (rule.attributes ?? []).filter(a => a.columnHeader === col && a.foundryField && !a.isVirtual);
+    if (linkedAttrs.length) {
+      menuItems.push({ separator: true });
+      for (const attr of linkedAttrs) {
+        menuItems.push({
+          icon: 'fa-unlink',
+          label: `Unlink "${attr.foundryField}"`,
+          action: () => {
+            rule.attributes = rule.attributes.filter(
+              a => !(a.columnHeader === col && a.foundryField === attr.foundryField)
+            );
+            this.#schedulePreviewAndRender();
+          }
+        });
+      }
+    }
   }
 
   /** Data cell context menu items: skip pattern, item start pattern */
@@ -1426,17 +1445,38 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       },
       {
         icon: 'fa-hashtag',
-        label: 'Convert to integer',
+        label: 'Convert to number',
         action: () => {
           const changed = bulkTransformColumn({
             ...bulkOpts(),
             transform: v => {
-              const parsed = parseInt(v.replace(/,/g, ''), 10);
+              const clean = v.replace(/,/g, '').trim();
+              // Mixed number: "1 1/2" → 1.5
+              const mixed = clean.match(/^(-?\d+)\s+(\d+)\s*\/\s*(\d+)$/);
+              if (mixed) {
+                const den = Number(mixed[3]);
+                if (den === 0) return null;
+                return String(Number(mixed[1]) + Number(mixed[2]) / den);
+              }
+              // Simple fraction: "1/2" → 0.5
+              const frac = clean.match(/^(-?\d+)\s*\/\s*(-?\d+)$/);
+              if (frac) {
+                const den = Number(frac[2]);
+                if (den === 0) return null;
+                return String(Number(frac[1]) / den);
+              }
+              const parsed = parseInt(clean, 10);
               return isNaN(parsed) ? null : String(parsed);
             }
           });
           if (changed > 0) this.render();
         }
+      },
+      { separator: true },
+      {
+        icon: 'fa-search',
+        label: 'Find & Replace',
+        action: () => this.#showFindReplacePopover(th, ruleId, field)
       }
     ]);
   }
@@ -1512,6 +1552,37 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     _showCellEditPopover(td, field.split('.').pop(), startVal, (val) => {
       this.#setCellOverride(ruleId, dibKey, field, val);
       this.render();
+    });
+  }
+
+  #showFindReplacePopover(th, ruleId, field) {
+    const rule        = this._rules.find(r => r.id === ruleId);
+    const ignoredKeys = new Set((rule?.ignoredItems ?? []).map(i => i._dibKey));
+    const label       = th.textContent.trim() || field.split('.').pop();
+
+    _showFindReplacePopover(th, label, ({ find, replace, useRegex, caseSensitive }) => {
+      const transform = useRegex
+        ? (() => {
+            const flags = caseSensitive ? 'g' : 'gi';
+            const re    = new RegExp(find, flags);
+            return v => v.replace(re, replace);
+          })()
+        : (caseSensitive
+            ? v => v.split(find).join(replace)
+            : (() => {
+                const re = new RegExp(find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+                return v => v.replace(re, replace);
+              })()
+          );
+
+      const changed = bulkTransformColumn({
+        ruleId, field,
+        items: this._preview[ruleId] ?? [],
+        cellOverrides: this._cellOverrides,
+        ignoredKeys,
+        transform
+      });
+      if (changed > 0) this.render();
     });
   }
 
@@ -1718,7 +1789,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
   static async #exportRules() {
     const data = {
-      _dibVersion: '1.0', system: game.system.id,
+      _dibVersion: '1.0', schemaVersion: RULES_SCHEMA_VERSION, system: game.system.id,
       exportedAt: new Date().toISOString(),
       rules: this._rules.map(r => foundry.utils.deepClone(r))
     };
@@ -1739,6 +1810,12 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       try {
         const data     = JSON.parse(await file.text());
         if (!Array.isArray(data.rules)) throw new Error('Missing "rules" array.');
+        const fileSchema = data.schemaVersion ?? 1;
+        if (fileSchema !== RULES_SCHEMA_VERSION) {
+          ui.notifications.warn(
+            `Dynamic Item Builder | Imported rules use schema version ${fileSchema}, but the current version is ${RULES_SCHEMA_VERSION}. Some rules may not work correctly.`
+          );
+        }
         const imported = data.rules.map(r => ({ ...makeDefaultRule(), ...r, id: foundry.utils.randomID() }));
         this._rules.push(...imported);
         this._selectedRuleId  = imported[0]?.id ?? this._selectedRuleId;

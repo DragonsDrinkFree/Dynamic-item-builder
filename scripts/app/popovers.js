@@ -35,7 +35,7 @@ export function createPopover({ anchor, className, innerHTML, onSave, onReady })
   popover.style.top  = `${Math.max(4, top)}px`;
 
   const cancel = () => popover.remove();
-  const save   = () => { onSave(popover); popover.remove(); };
+  const save   = () => { if (onSave(popover) !== false) popover.remove(); };
 
   popover.querySelector('.dib-cpop-save')?.addEventListener('click', save);
   popover.querySelector('.dib-cpop-cancel')?.addEventListener('click', cancel);
@@ -189,6 +189,65 @@ export function showMultiCellEditPopover(anchor, count, label, onSave) {
     },
     onReady(popover) {
       popover.querySelector('.dib-cpop-input').focus();
+    }
+  });
+}
+
+/**
+ * Build a Find & Replace popover for a column.
+ *
+ * @param {Element}  anchor   — the TH element
+ * @param {string}   label    — column field label
+ * @param {Function} onApply  — ({ find, replace, useRegex, caseSensitive }) => void
+ */
+export function showFindReplacePopover(anchor, label, onApply) {
+  createPopover({
+    anchor,
+    className: 'dib-cell-popover dib-findreplace-popover',
+    innerHTML: `
+      <div class="dib-cpop-label">Find &amp; Replace — <em style="font-weight:400;text-transform:none;font-size:10px">${escapeAttr(label)}</em></div>
+      <div class="dib-fr-row">
+        <label class="dib-fr-label">Find</label>
+        <input type="text" class="dib-cpop-input dib-fr-find" placeholder="Search pattern…">
+      </div>
+      <div class="dib-fr-row">
+        <label class="dib-fr-label">Replace</label>
+        <input type="text" class="dib-cpop-input dib-fr-replace" placeholder="Replacement…">
+      </div>
+      <div class="dib-fr-options">
+        <label class="dib-fr-check"><input type="checkbox" class="dib-fr-regex"> Regex</label>
+        <label class="dib-fr-check"><input type="checkbox" class="dib-fr-case"> Case sensitive</label>
+      </div>
+      <div class="dib-fr-error"></div>
+      <div class="dib-cpop-btns">
+        <button class="dib-btn dib-btn-sm dib-btn-primary dib-cpop-save">Apply</button>
+        <button class="dib-btn dib-btn-sm dib-cpop-cancel">Cancel</button>
+      </div>`,
+    onSave(popover) {
+      const find          = popover.querySelector('.dib-fr-find').value;
+      const replace       = popover.querySelector('.dib-fr-replace').value;
+      const useRegex      = popover.querySelector('.dib-fr-regex').checked;
+      const caseSensitive = popover.querySelector('.dib-fr-case').checked;
+      const errEl         = popover.querySelector('.dib-fr-error');
+
+      errEl.textContent = '';
+
+      if (!find) {
+        errEl.textContent = 'Find pattern cannot be empty.';
+        return false;
+      }
+
+      if (useRegex) {
+        try { new RegExp(find); } catch (e) {
+          errEl.textContent = `Invalid regex: ${e.message}`;
+          return false;
+        }
+      }
+
+      onApply({ find, replace, useRegex, caseSensitive });
+    },
+    onReady(popover) {
+      popover.querySelector('.dib-fr-find').focus();
     }
   });
 }

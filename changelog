@@ -1,3 +1,12 @@
+# v1.2.2
+
+## Major
+
+## Minor
+- Fixed "NaN" display in test run making things difficult to repair for integers.
+- "Convert to Integer" column interaction changed to "conver to number" will now take care of fraction to decimal conversions.
+- Added "find & Replace" column interaction for converting large amounts of text with new values based on a search pattern.
+
 # v1.2.1
 
 ## Code Refactor
