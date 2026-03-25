@@ -6,6 +6,9 @@
 import { extractPages, parsePageString, mergePageItems, filterItemsToRegion, collectTableRegionItems, groupIntoRows, detectColumns, mapRowsToCells, detectTables, applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits, parseTextRegion, normalizeItemName } from './pdf-parser.js';
 import { safeRegex, setNestedValue } from './utils.js';
 
+// Run `DIB_RULE_ENGINE_VERSION` in the browser console to confirm this build is loaded.
+globalThis.DIB_RULE_ENGINE_VERSION = 'multi-region-combine-v1';
+
 /**
  * Apply a rule to a loaded PDF document.
  * @param {Object} rule
@@ -52,24 +55,45 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
   const standaloneTextItems = [];
   const textFields = rule.textFields?.length ? rule.textFields : null;
 
-  for (const region of textRegions) {
-    const page = pages.find(p => p.pageNum === region.page);
-    if (!page) continue;
+  // Combine all non-standalone text regions into one Y-offset pool so that
+  // multi-column stat blocks and multi-region prose descriptions are parsed as
+  // a single continuous stream rather than isolated fragments.
+  // Regions are sorted by page then Y so items flow top-to-bottom, left-to-right.
+  const nonStandaloneRegions = textRegions.filter(r => !r.standalone);
+  const standaloneRegions    = textRegions.filter(r =>  r.standalone);
 
-    const regionItems = filterItemsToRegion(page.items, region);
-    if (!regionItems.length) continue;
-
-    const entries = parseTextRegion(regionItems, rule);
-
-    if (region.standalone) {
-      standaloneTextItems.push(...entries);
-    } else {
+  if (nonStandaloneRegions.length > 0) {
+    const sorted = [...nonStandaloneRegions].sort((a, b) => a.page - b.page || a.y - b.y);
+    let yOffset = 0;
+    const allItems = [];
+    for (const region of sorted) {
+      const page = pages.find(p => p.pageNum === region.page);
+      if (!page) continue;
+      const regionItems = filterItemsToRegion(page.items, region);
+      for (const item of regionItems) {
+        allItems.push({ ...item, y: item.y + yOffset });
+      }
+      if (regionItems.length) {
+        yOffset += Math.max(...regionItems.map(i => i.y)) + 50;
+      }
+    }
+    if (allItems.length) {
+      const entries = parseTextRegion(allItems, rule);
       const nameMap = new Map();
       for (const entry of entries) {
         nameMap.set(normalizeItemName(entry._textName ?? ''), entry);
       }
-      regionTextMaps.set(region.id, nameMap);
+      regionTextMaps.set('_combined', nameMap);
     }
+  }
+
+  for (const region of standaloneRegions) {
+    const page = pages.find(p => p.pageNum === region.page);
+    if (!page) continue;
+    const regionItems = filterItemsToRegion(page.items, region);
+    if (!regionItems.length) continue;
+    const entries = parseTextRegion(regionItems, rule);
+    standaloneTextItems.push(...entries);
   }
 
   // Virtual-column attributes: attributes with source === 'textRegion'
@@ -114,7 +138,7 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
         } else if (virtualAttrs.length) {
           // Old path: virtual attribute column mapping
           for (const vAttr of virtualAttrs) {
-            const nameMap = regionTextMaps.get(vAttr.textRegionId);
+            const nameMap = regionTextMaps.get(vAttr.textRegionId) ?? regionTextMaps.get('_combined');
             if (!nameMap) continue;
             const matched = findTextMatch(normName, nameMap);
             if (!matched) continue;
@@ -135,7 +159,8 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
     for (const [, nameMap] of regionTextMaps) {
       for (const [, entry] of nameMap) {
         const item = {};
-        const hasData = applyTextFieldValues(item, entry, textFields);
+        let hasData = applyTextFieldValues(item, entry, textFields);
+        hasData = applyTextFieldSplitValues(item, entry, rule) || hasData;
         if (hasData) {
           const rowText = Object.values(entry).join(' ');
           if (skipRe?.test(rowText)) continue;
@@ -153,6 +178,7 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
 
       if (textFields) {
         hasData = applyTextFieldValues(item, entry, textFields);
+        hasData = applyTextFieldSplitValues(item, entry, rule) || hasData;
       } else {
         // Old path: virtual attrs
         const standaloneRegionIds = new Set(textRegions.filter(r => r.standalone).map(r => r.id));
@@ -193,6 +219,28 @@ function applyTextFieldValues(item, entry, textFields) {
     if (htmlVal) {
       if (!item.__htmlFields) item.__htmlFields = {};
       item.__htmlFields[field.foundryAttr] = htmlVal;
+    }
+  }
+  return hasData;
+}
+
+/**
+ * Apply split field values from rule.textFieldSplits / rule.textFieldSplitAttrs onto an item.
+ * @returns {boolean} true if any value was set
+ */
+function applyTextFieldSplitValues(item, entry, rule) {
+  const splits = rule.textFieldSplits;
+  if (!splits) return false;
+  let hasData = false;
+  for (const [fieldId, delimiter] of Object.entries(splits)) {
+    if (!delimiter) continue;
+    const val = entry[fieldId] ?? '';
+    if (!val) continue;
+    const parts     = val.split(delimiter).map(p => p.trim());
+    const splitAttrs = rule.textFieldSplitAttrs?.[fieldId] ?? [];
+    for (let i = 0; i < parts.length; i++) {
+      const attr = splitAttrs[i];
+      if (attr && parts[i]) { setNestedValue(item, attr, parts[i]); hasData = true; }
     }
   }
   return hasData;

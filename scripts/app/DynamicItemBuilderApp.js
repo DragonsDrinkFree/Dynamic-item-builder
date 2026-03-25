@@ -28,6 +28,47 @@ const { ApplicationV2, HandlebarsApplicationMixin } = foundry.applications.api;
 
 const RULES_SCHEMA_VERSION = 1;
 
+/**
+ * Apply text field splits to a columns/entries pair in-place (preview use).
+ * textFieldSplits: { [fieldId]: delimiter }
+ * textFieldSplitAttrs: { [fieldId]: [attr0, attr1, ...] }
+ * Replaces each split source column with N numbered sub-columns and populates
+ * entry[fieldId__split__N] with the corresponding trimmed part.
+ */
+function applyTextFieldSplitsToContext(columns, entries, textFieldSplits, textFieldSplitAttrs) {
+  for (const [fieldId, delimiter] of Object.entries(textFieldSplits)) {
+    if (!delimiter) continue;
+    const colIdx = columns.findIndex(c => c.id === fieldId);
+    if (colIdx === -1) continue;
+
+    let maxParts = 1;
+    for (const entry of entries) {
+      const val = entry[fieldId] ?? '';
+      if (val) maxParts = Math.max(maxParts, val.split(delimiter).length);
+    }
+    if (maxParts <= 1) continue;
+
+    const sourceCol   = columns[colIdx];
+    const splitAttrs  = textFieldSplitAttrs?.[fieldId] ?? [];
+    const subCols     = Array.from({ length: maxParts }, (_, i) => ({
+      id:           `${fieldId}__split__${i}`,
+      header:       `${sourceCol.header || 'Field'} ${i + 1}`,
+      isJoinTarget: false,
+      foundryAttr:  splitAttrs[i] ?? '',
+      _splitFrom:   fieldId,
+      _splitIndex:  i
+    }));
+    columns.splice(colIdx, 1, ...subCols);
+
+    for (const entry of entries) {
+      const val   = entry[fieldId] ?? '';
+      const parts = val ? val.split(delimiter).map(p => p.trim()) : Array(maxParts).fill('');
+      while (parts.length < maxParts) parts.push(parts[parts.length - 1] ?? '');
+      for (let i = 0; i < maxParts; i++) entry[`${fieldId}__split__${i}`] = parts[i];
+    }
+  }
+}
+
 export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
   static DEFAULT_OPTIONS = {
@@ -247,6 +288,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
   _onRender(context, options) {
     super._onRender(context, options);
     this._bindEvents();
+    this.#restoreCollapseState();
     // Reapply selection highlights
     const previewList = this.element.querySelector('.preview-list');
     const ignoreList  = this.element.querySelector('.ignore-list');
@@ -401,6 +443,20 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
   /** Field rule events: legacy text rules, text field inputs, font-target selects */
   #bindFieldRuleEvents(el) {
+    // Collapse toggles — pure DOM state, persisted to localStorage
+    el.querySelector('.dib-field-rules-section')?.addEventListener('click', e => {
+      if (e.target.closest('[data-toggle="section-collapse"]')) {
+        e.stopPropagation();
+        e.target.closest('.dib-field-rules-section')?.classList.toggle('dib-collapsed');
+        this.#saveCollapseState();
+        return;
+      }
+      if (e.target.closest('[data-toggle="field-collapse"]')) {
+        e.stopPropagation();
+        e.target.closest('.dib-text-field-block')?.classList.toggle('dib-collapsed');
+        this.#saveCollapseState();
+      }
+    });
     // Legacy Name Rules inputs — update data only, no auto-refresh
     el.querySelector('.dib-text-rules-section')?.addEventListener('input', e => {
       const input = e.target.closest('.dib-text-rule-input');
@@ -475,6 +531,35 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       }
       this.#schedulePreview();
     });
+  }
+
+  #saveCollapseState() {
+    const ruleId = this.selectedRule?.id;
+    if (!ruleId) return;
+    const section = this.element.querySelector('.dib-field-rules-section');
+    const state = {
+      section: section?.classList.contains('dib-collapsed') ?? false,
+      fields:  {}
+    };
+    this.element.querySelectorAll('.dib-text-field-block[data-field-id]').forEach(block => {
+      state.fields[block.dataset.fieldId] = block.classList.contains('dib-collapsed');
+    });
+    localStorage.setItem(`dib-collapse-${ruleId}`, JSON.stringify(state));
+  }
+
+  #restoreCollapseState() {
+    const ruleId = this.selectedRule?.id;
+    if (!ruleId) return;
+    const stored = localStorage.getItem(`dib-collapse-${ruleId}`);
+    if (!stored) return;
+    const state = JSON.parse(stored);
+    const section = this.element.querySelector('.dib-field-rules-section');
+    if (section && state.section) section.classList.add('dib-collapsed');
+    for (const [fieldId, collapsed] of Object.entries(state.fields ?? {})) {
+      if (!collapsed) continue;
+      this.element.querySelector(`.dib-text-field-block[data-field-id="${fieldId}"]`)
+        ?.classList.add('dib-collapsed');
+    }
   }
 
   /** Item Preview cell interactions: drag-select, column header menu, cell context menu */
@@ -928,6 +1013,9 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       }
 
       // Scan text regions
+      // Font data is still collected per-region (drives the font dropdowns in the UI).
+      // Non-standalone regions are combined into one Y-offset pool so the preview
+      // reflects the same combined stream that applyRule uses for extraction.
       this._textScanData    = {};
       this._textRegionFonts = {};
       for (const region of textRegions) {
@@ -935,8 +1023,37 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         if (!page) continue;
         const regionItems = filterItemsToRegion(page.items, region);
         if (!regionItems.length) continue;
-
         this._textRegionFonts[region.id] = extractRegionFonts(regionItems);
+      }
+
+      const nonStandaloneRegions = textRegions.filter(r => !r.standalone);
+      const standaloneRegions    = textRegions.filter(r =>  r.standalone);
+
+      if (nonStandaloneRegions.length > 0) {
+        const sorted = [...nonStandaloneRegions].sort((a, b) => a.page - b.page || a.y - b.y);
+        let yOffset = 0;
+        const allTextItems = [];
+        for (const region of sorted) {
+          const page = pages.find(p => p.pageNum === region.page);
+          if (!page) continue;
+          const regionItems = filterItemsToRegion(page.items, region);
+          for (const item of regionItems) {
+            allTextItems.push({ ...item, y: item.y + yOffset });
+          }
+          if (regionItems.length) {
+            yOffset += Math.max(...regionItems.map(i => i.y)) + 50;
+          }
+        }
+        if (allTextItems.length) {
+          this._textScanData['_combined'] = parseTextRegion(allTextItems, rule);
+        }
+      }
+
+      for (const region of standaloneRegions) {
+        const page = pages.find(p => p.pageNum === region.page);
+        if (!page) continue;
+        const regionItems = filterItemsToRegion(page.items, region);
+        if (!regionItems.length) continue;
         this._textScanData[region.id] = parseTextRegion(regionItems, rule);
       }
     } catch (err) {
@@ -974,9 +1091,14 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     const nameAttr   = (rule.attributes ?? []).find(a => a.foundryField === 'name' && !a.isVirtual);
     const allEntries = [];
 
-    for (const region of textRegions) {
-      const entries = this._textScanData[region.id] ?? [];
-      allEntries.push(...entries);
+    const nonStandaloneRegions = textRegions.filter(r => !r.standalone);
+    const standaloneRegions    = textRegions.filter(r =>  r.standalone);
+
+    if (nonStandaloneRegions.length > 0) {
+      allEntries.push(...(this._textScanData['_combined'] ?? []));
+    }
+    for (const region of standaloneRegions) {
+      allEntries.push(...(this._textScanData[region.id] ?? []));
     }
 
     // Build column definitions
@@ -1001,6 +1123,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       ];
     }
 
+    if (rule.textFieldSplits) applyTextFieldSplitsToContext(columns, allEntries, rule.textFieldSplits, rule.textFieldSplitAttrs);
     const enrichedEntries = enrichTextEntries(allEntries, columns, this._scanData, nameAttr);
     const { availableFonts, availableFontSizes, availableFontNames } = aggregateTextFonts(this._textRegionFonts, textRegions);
 
@@ -1025,10 +1148,50 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     if (!fieldId) return;
     const rule = this.selectedRule;
     if (!rule) return;
+
+    const menuItems = [];
+
+    // Split sub-column: only show attribute mapping for that specific sub-column
+    if (fieldId.includes('__split__')) {
+      const sepIdx      = fieldId.lastIndexOf('__split__');
+      const sourceId    = fieldId.slice(0, sepIdx);
+      const splitIndex  = parseInt(fieldId.slice(sepIdx + 9));
+      const currentAttr = (rule.textFieldSplitAttrs?.[sourceId] ?? [])[splitIndex] ?? '';
+      appendAttributeMappingMenu(menuItems, th.querySelector('.dib-col-text')?.textContent.trim() ?? fieldId, this._cachedAttributePaths, (path) => {
+        rule.textFieldSplitAttrs ??= {};
+        rule.textFieldSplitAttrs[sourceId] ??= [];
+        rule.textFieldSplitAttrs[sourceId][splitIndex] = path;
+        this.#schedulePreviewAndRender();
+      });
+      if (currentAttr) {
+        menuItems.push({ separator: true });
+        menuItems.push({ icon: 'fa-times', label: 'Clear attribute mapping', action: () => {
+          if (rule.textFieldSplitAttrs?.[sourceId]) rule.textFieldSplitAttrs[sourceId][splitIndex] = '';
+          this.render();
+        }});
+      }
+      this.#showContextMenu(event, menuItems);
+      return;
+    }
+
     const tf = (rule.textFields ?? []).find(f => f.id === fieldId);
     if (!tf) return;
 
-    const menuItems = [];
+    // Split Field option
+    const hasSplit = rule.textFieldSplits?.[fieldId];
+    menuItems.push({
+      icon: 'fa-columns',
+      label: hasSplit ? `Edit Split: "${tf.header || 'field'}" (on "${hasSplit}")` : `Split Field: "${tf.header || 'field'}"`,
+      action: () => this.#showTextFieldSplitPopover(event, fieldId, tf.header || 'field')
+    });
+    if (hasSplit) {
+      menuItems.push({ icon: 'fa-times', label: 'Remove Split', action: () => {
+        delete rule.textFieldSplits[fieldId];
+        if (rule.textFieldSplitAttrs?.[fieldId]) delete rule.textFieldSplitAttrs[fieldId];
+        this.#schedulePreviewAndRender();
+      }});
+    }
+    menuItems.push({ separator: true });
 
     // Join Target toggle
     if (tf.isJoinTarget) {
@@ -1065,6 +1228,20 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     }
 
     this.#showContextMenu(event, menuItems);
+  }
+
+  #showTextFieldSplitPopover(event, fieldId, fieldHeader) {
+    const rule = this.selectedRule;
+    if (!rule) return;
+    const anchor = event.target.closest('th')
+      ?? { getBoundingClientRect: () => ({ bottom: event.clientY, left: event.clientX, top: event.clientY }) };
+    _showSplitColumnPopover(anchor, fieldHeader, rule.textFieldSplits?.[fieldId] ?? '', (delimiter) => {
+      if (delimiter) {
+        rule.textFieldSplits ??= {};
+        rule.textFieldSplits[fieldId] = delimiter;
+      }
+      this.#schedulePreviewAndRender();
+    });
   }
 
   // -------------------------------------------------------------------------

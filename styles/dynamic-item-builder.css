@@ -1710,6 +1710,21 @@ div.ignore-tr {
   margin: 0;
   padding: 3px 8px;
 }
+.dib-collapse-toggle {
+  color: rgba(192, 181, 240, 0.5);
+  flex-shrink: 0;
+}
+.dib-collapse-toggle .fas {
+  transition: transform 0.15s ease;
+}
+.dib-field-rules-section.dib-collapsed .dib-section-collapse .fas,
+.dib-text-field-block.dib-collapsed .dib-field-collapse .fas {
+  transform: rotate(-90deg);
+}
+.dib-field-rules-section.dib-collapsed .dib-field-rules-body,
+.dib-text-field-block.dib-collapsed .dib-text-field-body {
+  display: none;
+}
 .dib-col-attr-badge {
   display: block;
   font-size: 9px;
