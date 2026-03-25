@@ -6,68 +6,23 @@
  * Right panel  : previews — Table Preview | Text Preview | Item Preview
  */
 
-import {
-  loadPDF, extractPages, parsePageString, mergePageItems, filterItemsToRegion,
-  collectTableRegionItems, detectTables, renderPageToCanvas,
-  applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits,
-  parseTextRegion, extractRegionFonts, groupIntoRows
-} from '../pdf-parser.js';
+import { loadPDF, renderPageToCanvas, parsePageString } from '../pdf-parser.js';
 import { applyRule }   from '../rule-engine.js';
 import { buildItems }  from '../item-builder.js';
-import { escapeRegex } from '../utils.js';
+import { escapeRegex, getIgnoredKeySet } from '../utils.js';
 import { showContextMenu, appendAttributeMappingMenu } from './context-menu.js';
 import { computeSuggestionsForRule, enrichScanDataColumns } from './suggestions.js';
 import { getSystemItemTypes, getItemAttributePaths, makeDefaultRule, makeDefaultAttribute } from './factories.js';
 import { showSetHeadersPopover as _showSetHeadersPopover, showSplitColumnPopover as _showSplitColumnPopover, showCellEditPopover as _showCellEditPopover, showMultiCellEditPopover as _showMultiCellEditPopover, showFindReplacePopover as _showFindReplacePopover } from './popovers.js';
 import { applyCellSelClasses, applyTestErrorClasses, applyOverrideClasses, bulkTransformColumn } from './cell-operations.js';
-import { buildPreviewSummary, enrichTextEntries, aggregateTextFonts } from './prepare-context.js';
+import { buildPreviewSummary } from './prepare-context.js';
 import { getPdfCoords, createRegionData, buildRegionOverlay } from './planner.js';
 import { validateItems } from './validation.js';
+import { runScan as runScanPipeline, buildTextScanContext } from './scan.js';
 
 const { ApplicationV2, HandlebarsApplicationMixin } = foundry.applications.api;
 
 const RULES_SCHEMA_VERSION = 1;
-
-/**
- * Apply text field splits to a columns/entries pair in-place (preview use).
- * textFieldSplits: { [fieldId]: delimiter }
- * textFieldSplitAttrs: { [fieldId]: [attr0, attr1, ...] }
- * Replaces each split source column with N numbered sub-columns and populates
- * entry[fieldId__split__N] with the corresponding trimmed part.
- */
-function applyTextFieldSplitsToContext(columns, entries, textFieldSplits, textFieldSplitAttrs) {
-  for (const [fieldId, delimiter] of Object.entries(textFieldSplits)) {
-    if (!delimiter) continue;
-    const colIdx = columns.findIndex(c => c.id === fieldId);
-    if (colIdx === -1) continue;
-
-    let maxParts = 1;
-    for (const entry of entries) {
-      const val = entry[fieldId] ?? '';
-      if (val) maxParts = Math.max(maxParts, val.split(delimiter).length);
-    }
-    if (maxParts <= 1) continue;
-
-    const sourceCol   = columns[colIdx];
-    const splitAttrs  = textFieldSplitAttrs?.[fieldId] ?? [];
-    const subCols     = Array.from({ length: maxParts }, (_, i) => ({
-      id:           `${fieldId}__split__${i}`,
-      header:       `${sourceCol.header || 'Field'} ${i + 1}`,
-      isJoinTarget: false,
-      foundryAttr:  splitAttrs[i] ?? '',
-      _splitFrom:   fieldId,
-      _splitIndex:  i
-    }));
-    columns.splice(colIdx, 1, ...subCols);
-
-    for (const entry of entries) {
-      const val   = entry[fieldId] ?? '';
-      const parts = val ? val.split(delimiter).map(p => p.trim()) : Array(maxParts).fill('');
-      while (parts.length < maxParts) parts.push(parts[parts.length - 1] ?? '');
-      for (let i = 0; i < maxParts; i++) entry[`${fieldId}__split__${i}`] = parts[i];
-    }
-  }
-}
 
 export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
@@ -999,76 +954,13 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     }
 
     try {
-      const pageNums     = parsePageString(rule.pages, this._pdf.numPages);
-      const pages        = await extractPages(this._pdf, pageNums);
-      const tableRegions = (rule.regions ?? []).filter(r => r.type === 'table');
-      const textRegions  = (rule.regions ?? []).filter(r => r.type === 'text');
-
-      if (tableRegions.length > 0) {
-        this._scanData = collectTableRegionItems(pages, tableRegions);
-      } else {
-        // Auto-detect fallback
-        const allItems = mergePageItems(pages);
-        this._scanData = detectTables(allItems);
-      }
-
-      // Scan text regions
-      // Font data is still collected per-region (drives the font dropdowns in the UI).
-      // Non-standalone regions are combined into one Y-offset pool so the preview
-      // reflects the same combined stream that applyRule uses for extraction.
-      this._textScanData    = {};
-      this._textRegionFonts = {};
-      for (const region of textRegions) {
-        const page = pages.find(p => p.pageNum === region.page);
-        if (!page) continue;
-        const regionItems = filterItemsToRegion(page.items, region);
-        if (!regionItems.length) continue;
-        this._textRegionFonts[region.id] = extractRegionFonts(regionItems);
-      }
-
-      const nonStandaloneRegions = textRegions.filter(r => !r.standalone);
-      const standaloneRegions    = textRegions.filter(r =>  r.standalone);
-
-      if (nonStandaloneRegions.length > 0) {
-        const sorted = [...nonStandaloneRegions].sort((a, b) => a.page - b.page);
-        const allTextItems = [];
-        let fakeY = 0;
-        for (const region of sorted) {
-          const page = pages.find(p => p.pageNum === region.page);
-          if (!page) continue;
-          const regionItems = filterItemsToRegion(page.items, region);
-          const rows = groupIntoRows(regionItems);
-          for (const row of rows) {
-            for (const item of row.items) {
-              allTextItems.push({ ...item, y: fakeY });
-            }
-            fakeY += 100;
-          }
-        }
-        if (allTextItems.length) {
-          this._textScanData['_combined'] = parseTextRegion(allTextItems, rule);
-        }
-      }
-
-      for (const region of standaloneRegions) {
-        const page = pages.find(p => p.pageNum === region.page);
-        if (!page) continue;
-        const regionItems = filterItemsToRegion(page.items, region);
-        if (!regionItems.length) continue;
-        this._textScanData[region.id] = parseTextRegion(regionItems, rule);
-      }
+      const result = await runScanPipeline(this._pdf, rule);
+      this._scanData        = result.scanData;
+      this._textScanData    = result.textScanData;
+      this._textRegionFonts = result.textRegionFonts;
     } catch (err) {
       console.warn('Dynamic Item Builder | Scan error:', err);
       this.#clearScanState();
-    }
-
-    // Apply any manually-set column headers stored in the rule
-    applyManualHeaderOverrides(this._scanData?.tables, rule?.manualHeaders);
-
-    // Apply column merges and splits defined for this rule
-    if (this._scanData?.tables) {
-      if (rule?.columnMerges) applyColumnMerges(this._scanData.tables, rule.columnMerges);
-      if (rule?.columnSplits) applyColumnSplits(this._scanData.tables, rule.columnSplits);
     }
 
     // Auto-populate headerPattern from the first labeled column if not already set
@@ -1080,63 +972,9 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
   /**
    * Build the data context for the Text Preview tab.
-   * Returns an array of region objects, each with their parsed entries enriched
-   * with match status (matched/unmatched/unlinked) relative to the table scan.
    */
   #buildTextScanContext(rule) {
-    if (!rule) return null;
-    const textRegions = (rule.regions ?? []).filter(r => r.type === 'text');
-    if (!textRegions.length) return null;
-
-    const textFields = rule.textFields?.length ? rule.textFields : null;
-    const nameAttr   = (rule.attributes ?? []).find(a => a.foundryField === 'name' && !a.isVirtual);
-    const allEntries = [];
-
-    const nonStandaloneRegions = textRegions.filter(r => !r.standalone);
-    const standaloneRegions    = textRegions.filter(r =>  r.standalone);
-
-    if (nonStandaloneRegions.length > 0) {
-      allEntries.push(...(this._textScanData['_combined'] ?? []));
-    }
-    for (const region of standaloneRegions) {
-      allEntries.push(...(this._textScanData[region.id] ?? []));
-    }
-
-    // Build column definitions
-    let columns;
-    if (textFields) {
-      columns = textFields.map(f => ({
-        id:           f.id,
-        header:       f.header || (f.isJoinTarget ? 'Name' : 'Data'),
-        isJoinTarget: !!f.isJoinTarget,
-        foundryAttr:  f.foundryAttr ?? ''
-      }));
-    } else {
-      // Legacy path: fixed Name + Description columns plus any labeled keys
-      const extraKeys = new Set();
-      for (const e of allEntries) {
-        for (const k of Object.keys(e)) { if (!k.startsWith('_')) extraKeys.add(k); }
-      }
-      columns = [
-        { id: '_textName',        header: 'Name',        isJoinTarget: true,  foundryAttr: '' },
-        ...[...extraKeys].map(k => ({ id: k, header: k, isJoinTarget: false, foundryAttr: '' })),
-        { id: '_textDescription', header: 'Description',  isJoinTarget: false, foundryAttr: '' }
-      ];
-    }
-
-    if (rule.textFieldSplits) applyTextFieldSplitsToContext(columns, allEntries, rule.textFieldSplits, rule.textFieldSplitAttrs);
-    const enrichedEntries = enrichTextEntries(allEntries, columns, this._scanData, nameAttr);
-    const { availableFonts, availableFontSizes, availableFontNames } = aggregateTextFonts(this._textRegionFonts, textRegions);
-
-    return {
-      columns,
-      entries:           enrichedEntries,
-      hasEntries:        enrichedEntries.length > 0,
-      unmatchedCount:    enrichedEntries.filter(e => e._matchStatus === 'unmatched').length,
-      availableFonts,
-      availableFontSizes,
-      availableFontNames
-    };
+    return buildTextScanContext(rule, this._textScanData, this._textRegionFonts, this._scanData);
   }
 
   // -------------------------------------------------------------------------
@@ -1609,7 +1447,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
     const bulkOpts = () => {
       const rule        = this._rules.find(r => r.id === ruleId);
-      const ignoredKeys = new Set((rule?.ignoredItems ?? []).map(i => i._dibKey));
+      const ignoredKeys = getIgnoredKeySet(rule);
       return { ruleId, field, items: this._preview[ruleId] ?? [], cellOverrides: this._cellOverrides, ignoredKeys };
     };
 
@@ -1735,7 +1573,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
 
   #showFindReplacePopover(th, ruleId, field) {
     const rule        = this._rules.find(r => r.id === ruleId);
-    const ignoredKeys = new Set((rule?.ignoredItems ?? []).map(i => i._dibKey));
+    const ignoredKeys = getIgnoredKeySet(rule);
     const label       = th.textContent.trim() || field.split('.').pop();
 
     _showFindReplacePopover(th, label, ({ find, replace, useRegex, caseSensitive }) => {
@@ -1939,7 +1777,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       if (!rawItems?.length || !rule.itemType) continue;
 
       // Apply ignored-item filter and cell overrides — same logic as _prepareContext
-      const ignoredKeys = new Set((rule.ignoredItems ?? []).map(i => i._dibKey));
+      const ignoredKeys = getIgnoredKeySet(rule);
       const items = rawItems
         .map((item, idx) => {
           const dibKey = `_${idx}`;

@@ -4,6 +4,7 @@
  */
 
 import { normalizeItemName } from '../pdf-parser.js';
+import { getIgnoredKeySet } from '../utils.js';
 
 /**
  * Build the preview summary array used by the Item Preview tab.
@@ -34,7 +35,7 @@ export function buildPreviewSummary(rules, preview, cellOverrides) {
       }
     }
 
-    const ignoredKeys = new Set((r.ignoredItems ?? []).map(i => i._dibKey));
+    const ignoredKeys = getIgnoredKeySet(r);
     const rawItems    = preview[r.id] ?? null;
     const flatItems   = rawItems
       ? rawItems

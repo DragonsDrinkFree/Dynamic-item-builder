@@ -3,7 +3,7 @@
  * an array of detected items: [{ name, [foundryField]: value, ... }]
  */
 
-import { extractPages, parsePageString, mergePageItems, filterItemsToRegion, collectTableRegionItems, groupIntoRows, detectColumns, mapRowsToCells, applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits, parseTextRegion, normalizeItemName } from './pdf-parser.js';
+import { extractPages, parsePageString, mergePageItems, filterItemsToRegion, collectTableRegionItems, groupIntoRows, detectColumns, mapRowsToCells, applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits, parseTextRegion, normalizeItemName, combineTextRegionItems } from './pdf-parser.js';
 import { safeRegex, setNestedValue } from './utils.js';
 
 // Run `DIB_RULE_ENGINE_VERSION` in the browser console to confirm this build is loaded.
@@ -68,67 +68,57 @@ export async function applyRule(rule, pdfDoc) {
 
 /**
  * Region-aware extraction path.
- * Handles table regions (existing behaviour) and text regions (new).
- * Text regions are parsed into a name-keyed map and either:
- *   - injected as virtual column values into matched table rows, or
- *   - used to create standalone items when region.standalone === true.
+ * Orchestrates table preparation, text region parsing, and item extraction.
  */
 function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
-  const { tables: allTables } = collectTableRegionItems(pages, regions);
+  const allTables = prepareTableData(pages, regions, rule);
+  const { regionTextMaps, standaloneTextItems } = parseAllTextRegions(pages, textRegions, rule);
 
-  // Apply the same transforms as the Table Preview so attribute mappings align
-  applyManualHeaderOverrides(allTables, rule.manualHeaders);
-  applyColumnMerges(allTables, rule.columnMerges);
-  applyColumnSplits(allTables, rule.columnSplits);
-
-  // Parse text regions → build per-region name→entry maps
-  // regionTextMaps: Map<regionId, Map<normalizedName, entryObject>>
-  const regionTextMaps = new Map();
-  const standaloneTextItems = [];
+  const skipRe     = rule.skipPattern?.trim() ? safeRegex(rule.skipPattern) : null;
   const textFields = rule.textFields?.length ? rule.textFields : null;
 
-  // Combine all non-standalone text regions into one continuous stream so that
-  // multi-column stat blocks and multi-region prose descriptions flow as a single
-  // sequence. Regions are processed in draw order (per page) so the user controls
-  // the reading order by painting boxes in the intended sequence.
+  const results = extractItemsFromTables(allTables, regionTextMaps, rule, skipRe);
+
+  if (results.length === 0 && regionTextMaps.size > 0 && textFields?.length) {
+    results.push(...extractItemsFromText(regionTextMaps, rule, skipRe));
+  }
+
+  if (standaloneTextItems.length) {
+    results.push(...extractStandaloneItems(standaloneTextItems, textRegions, rule));
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// applyRuleWithRegions sub-functions
+// ---------------------------------------------------------------------------
+
+/** Collect and transform table region data. */
+function prepareTableData(pages, regions, rule) {
+  const { tables } = collectTableRegionItems(pages, regions);
+  applyManualHeaderOverrides(tables, rule.manualHeaders);
+  applyColumnMerges(tables, rule.columnMerges);
+  applyColumnSplits(tables, rule.columnSplits);
+  return tables;
+}
+
+/**
+ * Parse all text regions into a name-keyed map (non-standalone combined)
+ * and a flat array (standalone).
+ */
+function parseAllTextRegions(pages, textRegions, rule) {
+  const regionTextMaps = new Map();
+  const standaloneTextItems = [];
+
   const nonStandaloneRegions = textRegions.filter(r => !r.standalone);
   const standaloneRegions    = textRegions.filter(r =>  r.standalone);
 
   if (nonStandaloneRegions.length > 0) {
-    // Sort by page only — preserve draw order within the same page so that
-    // multi-column text regions flow in the order the user painted them.
-    const sorted = [...nonStandaloneRegions].sort((a, b) => a.page - b.page);
-
-    // Group each region's items into rows individually (correct intra-region
-    // ordering), then stamp sequential fake-Y values so that downstream
-    // groupIntoRows() sees one flat, correctly-ordered stream regardless of
-    // PDF coordinate direction or overlapping page coordinates between regions.
-    const allItems = [];
-    let fakeY = 0;
-    const _dbgRows = [];
-    const _dbgRegionOrder = [];
-    let _dbgRowIdx = 0;
-    for (const region of sorted) {
-      const page = pages.find(p => p.pageNum === region.page);
-      if (!page) continue;
-      const regionItems = filterItemsToRegion(page.items, region);
-      const regionLabel = `p${region.page} (${Math.round(region.x)},${Math.round(region.y)} ${Math.round(region.w)}×${Math.round(region.h)})`;
-      _dbgRegionOrder.push(regionLabel);
-      const rows = groupIntoRows(regionItems);
-      for (const row of rows) {
-        const sorted2 = [...row.items].sort((a, b) => a.x - b.x);
-        const rowText = sorted2.map(i => i.text).join(' ').trim();
-        const rep = sorted2[0];
-        _dbgRows.push({ index: _dbgRowIdx++, fakeY, regionLabel, text: rowText, fontSize: rep?.fontSize ?? '', fontName: rep?.fontName ?? '' });
-        for (const item of row.items) {
-          allItems.push({ ...item, y: fakeY });
-        }
-        fakeY += 100;
-      }
-    }
+    const { items: allItems, debugRows, debugRegionOrder } = combineTextRegionItems(pages, nonStandaloneRegions);
     if (allItems.length) {
       const entries = parseTextRegion(allItems, rule);
-      globalThis._DIB_lastStreamDebug = { regionCount: sorted.length, regionOrder: _dbgRegionOrder, rows: _dbgRows, items: allItems, entries };
+      globalThis._DIB_lastStreamDebug = { regionCount: nonStandaloneRegions.length, regionOrder: debugRegionOrder, rows: debugRows, items: allItems, entries };
       const nameMap = new Map();
       for (const entry of entries) {
         nameMap.set(normalizeItemName(entry._textName ?? ''), entry);
@@ -142,15 +132,17 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
     if (!page) continue;
     const regionItems = filterItemsToRegion(page.items, region);
     if (!regionItems.length) continue;
-    const entries = parseTextRegion(regionItems, rule);
-    standaloneTextItems.push(...entries);
+    standaloneTextItems.push(...parseTextRegion(regionItems, rule));
   }
 
-  // Virtual-column attributes: attributes with source === 'textRegion'
-  const virtualAttrs  = (rule.attributes ?? []).filter(a => a.isVirtual && a.textRegionId);
-  const regularAttrs  = (rule.attributes ?? []).filter(a => !a.isVirtual);
+  return { regionTextMaps, standaloneTextItems };
+}
 
-  const skipRe  = rule.skipPattern?.trim() ? safeRegex(rule.skipPattern) : null;
+/** Extract items from table rows, injecting matched text region data. */
+function extractItemsFromTables(allTables, regionTextMaps, rule, skipRe) {
+  const virtualAttrs = (rule.attributes ?? []).filter(a => a.isVirtual && a.textRegionId);
+  const regularAttrs = (rule.attributes ?? []).filter(a => !a.isVirtual);
+  const textFields   = rule.textFields?.length ? rule.textFields : null;
   const results = [];
 
   for (const table of allTables) {
@@ -158,7 +150,6 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
     table.columns.forEach((col, i) => { colIndexMap[col.header] = i; });
 
     for (const row of table.rows) {
-      // Skip injected header rows and section-label rows added by merge/split logic
       if (row._injected || row._sectionHeader) continue;
 
       const cells = {};
@@ -186,7 +177,6 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
             if (matched) applyTextFieldValues(item, matched, textFields);
           }
         } else if (virtualAttrs.length) {
-          // Old path: virtual attribute column mapping
           for (const vAttr of virtualAttrs) {
             const nameMap = regionTextMaps.get(vAttr.textRegionId) ?? regionTextMaps.get('_combined');
             if (!nameMap) continue;
@@ -203,48 +193,56 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
     }
   }
 
-  // Text-region-as-items path: when no table produced results, use text entries directly.
-  // Each entry in regionTextMaps becomes its own item via foundryAttr mappings.
-  if (results.length === 0 && regionTextMaps.size > 0 && textFields?.length) {
-    for (const [, nameMap] of regionTextMaps) {
-      for (const [, entry] of nameMap) {
-        const item = {};
-        let hasData = applyTextFieldValues(item, entry, textFields);
-        hasData = applyTextFieldSplitValues(item, entry, rule) || hasData;
-        if (hasData) {
-          const rowText = Object.values(entry).join(' ');
-          if (skipRe?.test(rowText)) continue;
-          results.push(item);
-        }
+  return results;
+}
+
+/** Create items directly from text entries when no table produced results. */
+function extractItemsFromText(regionTextMaps, rule, skipRe) {
+  const textFields = rule.textFields?.length ? rule.textFields : null;
+  const results = [];
+
+  for (const [, nameMap] of regionTextMaps) {
+    for (const [, entry] of nameMap) {
+      const item = {};
+      let hasData = applyTextFieldValues(item, entry, textFields);
+      hasData = applyTextFieldSplitValues(item, entry, rule) || hasData;
+      if (hasData) {
+        const rowText = Object.values(entry).join(' ');
+        if (skipRe?.test(rowText)) continue;
+        results.push(item);
       }
     }
   }
 
-  // Standalone text-only items
-  if (standaloneTextItems.length) {
-    for (const entry of standaloneTextItems) {
-      const item = {};
-      let hasData = false;
+  return results;
+}
 
-      if (textFields) {
-        hasData = applyTextFieldValues(item, entry, textFields);
-        hasData = applyTextFieldSplitValues(item, entry, rule) || hasData;
-      } else {
-        // Old path: virtual attrs
-        const standaloneRegionIds = new Set(textRegions.filter(r => r.standalone).map(r => r.id));
-        const textOnlyAttrs = (rule.attributes ?? []).filter(
-          a => a.isVirtual && standaloneRegionIds.has(a.textRegionId)
-        );
-        for (const attr of textOnlyAttrs) {
-          if (!attr.foundryField) continue;
-          const rawValue = entry[attr.columnHeader] ?? '';
-          const value = applyTransform(String(rawValue).trim(), attr.transform);
-          if (value !== '') { hasData = true; setNestedValue(item, attr.foundryField, value); }
-        }
+/** Create items from standalone text region entries. */
+function extractStandaloneItems(standaloneTextItems, textRegions, rule) {
+  const textFields = rule.textFields?.length ? rule.textFields : null;
+  const results = [];
+
+  for (const entry of standaloneTextItems) {
+    const item = {};
+    let hasData = false;
+
+    if (textFields) {
+      hasData = applyTextFieldValues(item, entry, textFields);
+      hasData = applyTextFieldSplitValues(item, entry, rule) || hasData;
+    } else {
+      const standaloneRegionIds = new Set(textRegions.filter(r => r.standalone).map(r => r.id));
+      const textOnlyAttrs = (rule.attributes ?? []).filter(
+        a => a.isVirtual && standaloneRegionIds.has(a.textRegionId)
+      );
+      for (const attr of textOnlyAttrs) {
+        if (!attr.foundryField) continue;
+        const rawValue = entry[attr.columnHeader] ?? '';
+        const value = applyTransform(String(rawValue).trim(), attr.transform);
+        if (value !== '') { hasData = true; setNestedValue(item, attr.foundryField, value); }
       }
-
-      if (hasData) results.push(item);
     }
+
+    if (hasData) results.push(item);
   }
 
   return results;
