@@ -384,6 +384,10 @@
           {{!-- Field Rules --}}
           <div class="dib-field-rules-section" data-fonts="{{textFontsJson}}">
             <div class="dib-field-rules-header">
+              <button class="dib-btn dib-btn-icon dib-collapse-toggle dib-section-collapse" data-toggle="section-collapse"
+                      title="Collapse/expand field rules">
+                <i class="fas fa-chevron-down"></i>
+              </button>
               <button class="dib-btn dib-btn-sm{{#if previewDirty}} dib-btn-dirty{{/if}}" data-action="refreshPreview"
                       title="Apply field rules and refresh text preview">
                 <i class="fas fa-sync-alt"></i> Refresh
@@ -394,11 +398,15 @@
                 <i class="fas fa-plus"></i> Add Field
               </button>
             </div>
-
+            <div class="dib-field-rules-body">
 
             {{#each selectedRule.textFields}}
             <div class="dib-text-field-block{{#if this.isJoinTarget}} dib-field-join-target{{/if}}" data-field-id="{{this.id}}">
               <div class="dib-text-field-header">
+                <button class="dib-btn dib-btn-icon dib-collapse-toggle dib-field-collapse" data-toggle="field-collapse"
+                        title="Collapse/expand field">
+                  <i class="fas fa-chevron-down"></i>
+                </button>
                 <input type="text" class="dib-text-field-header-input"
                        data-field-id="{{this.id}}" data-field-prop="header"
                        value="{{this.header}}" placeholder="Field label…">
@@ -416,6 +424,7 @@
                   <i class="fas fa-times"></i>
                 </button>
               </div>
+              <div class="dib-text-field-body">
               {{#each this.rules}}
               <div class="dib-text-rule-row{{#if (eq this.type "format")}} dib-format-rule-row{{/if}}" data-rule-id="{{this.id}}">
                 {{#if (eq this.type "format")}}
@@ -549,12 +558,14 @@
                   <i class="fas fa-plus"></i> Format
                 </button>
               </div>
+              </div>{{!-- /dib-text-field-body --}}
             </div>
             {{/each}}
 
             {{#unless selectedRule.textFields.length}}
             <p class="dib-text-rules-empty">No fields — click Add Field to start parsing text regions.</p>
             {{/unless}}
+            </div>{{!-- /dib-field-rules-body --}}
           </div>
 
           {{#if textScanContext}}

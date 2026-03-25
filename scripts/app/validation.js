@@ -3,6 +3,8 @@
  * Foundry's DataModel schema without actually creating documents.
  */
 
+import { getIgnoredKeySet } from '../utils.js';
+
 /**
  * Validate all preview items against the Foundry Item DataModel.
  *
@@ -18,7 +20,7 @@ export function validateItems(rules, preview, cellOverrides, ItemClass) {
   for (const rule of rules) {
     const rawItems = preview[rule.id];
     if (!rawItems?.length || !rule.itemType) continue;
-    const ignoredKeys = new Set((rule.ignoredItems ?? []).map(i => i._dibKey));
+    const ignoredKeys = getIgnoredKeySet(rule);
 
     for (const [idx, parsed] of rawItems.entries()) {
       const dibKey = `_${idx}`;

@@ -1169,3 +1169,51 @@ export function applyFieldFormats(text, rules) {
 
   return html;
 }
+
+// ---------------------------------------------------------------------------
+// Region combining
+// ---------------------------------------------------------------------------
+
+/**
+ * Combine non-standalone text regions into a single flat item stream.
+ *
+ * Each region's items are grouped into rows internally (correct intra-region
+ * ordering), then stamped with sequential fake-Y values so that a downstream
+ * groupIntoRows() call sees one correctly-ordered stream regardless of PDF
+ * coordinate direction or overlapping page coordinates between regions.
+ *
+ * Regions are sorted by page, preserving draw order within the same page.
+ *
+ * @param {Array} pages    — extractPages() result
+ * @param {Array} regions  — non-standalone text region descriptors
+ * @returns {{ items: Array, debugRows: Array, debugRegionOrder: string[] }}
+ */
+export function combineTextRegionItems(pages, regions) {
+  const sorted = [...regions].sort((a, b) => a.page - b.page);
+  const items = [];
+  const debugRows = [];
+  const debugRegionOrder = [];
+  let fakeY = 0;
+  let rowIdx = 0;
+
+  for (const region of sorted) {
+    const page = pages.find(p => p.pageNum === region.page);
+    if (!page) continue;
+    const regionItems = filterItemsToRegion(page.items, region);
+    const regionLabel = `p${region.page} (${Math.round(region.x)},${Math.round(region.y)} ${Math.round(region.w)}×${Math.round(region.h)})`;
+    debugRegionOrder.push(regionLabel);
+    const rows = groupIntoRows(regionItems);
+    for (const row of rows) {
+      const sortedRow = [...row.items].sort((a, b) => a.x - b.x);
+      const rowText = sortedRow.map(i => i.text).join(' ').trim();
+      const rep = sortedRow[0];
+      debugRows.push({ index: rowIdx++, fakeY, regionLabel, text: rowText, fontSize: rep?.fontSize ?? '', fontName: rep?.fontName ?? '' });
+      for (const item of row.items) {
+        items.push({ ...item, y: fakeY });
+      }
+      fakeY += 100;
+    }
+  }
+
+  return { items, debugRows, debugRegionOrder };
+}

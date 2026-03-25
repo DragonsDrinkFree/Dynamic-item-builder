@@ -51,3 +51,10 @@ export function escapeHtml(str) {
 export function escapeAttr(str) {
   return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 }
+
+/**
+ * Build a Set of _dibKey strings for items in a rule's ignored list.
+ */
+export function getIgnoredKeySet(rule) {
+  return new Set((rule?.ignoredItems ?? []).map(i => i._dibKey));
+}
