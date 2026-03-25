@@ -3,11 +3,43 @@
  * an array of detected items: [{ name, [foundryField]: value, ... }]
  */
 
-import { extractPages, parsePageString, mergePageItems, filterItemsToRegion, collectTableRegionItems, groupIntoRows, detectColumns, mapRowsToCells, detectTables, applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits, parseTextRegion, normalizeItemName } from './pdf-parser.js';
+import { extractPages, parsePageString, mergePageItems, filterItemsToRegion, collectTableRegionItems, groupIntoRows, detectColumns, mapRowsToCells, applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits, parseTextRegion, normalizeItemName } from './pdf-parser.js';
 import { safeRegex, setNestedValue } from './utils.js';
 
 // Run `DIB_RULE_ENGINE_VERSION` in the browser console to confirm this build is loaded.
 globalThis.DIB_RULE_ENGINE_VERSION = 'multi-region-combine-v1';
+
+/**
+ * Debug helper — call `DIB_DEBUG_STREAM()` in the browser console after a
+ * preview run to inspect the text stream that was built from combined regions.
+ *
+ * `DIB_DEBUG_STREAM(true)` prints a compact numbered list of rows.
+ * `DIB_DEBUG_STREAM(false)` (default) prints a full table with font metadata.
+ */
+globalThis._DIB_lastStreamDebug = null;
+globalThis.DIB_DEBUG_STREAM = function(compact = false) {
+  const d = globalThis._DIB_lastStreamDebug;
+  if (!d) { console.warn('[DIB] No stream data yet — run a preview first.'); return; }
+  console.group(`[DIB] Text stream — ${d.regionCount} region(s), ${d.rows.length} row(s), ${d.items.length} item(s)`);
+  console.log('Regions (in processing order):', d.regionOrder);
+  if (compact) {
+    d.rows.forEach((r, i) => console.log(`  row ${String(i).padStart(3, '0')}  fakeY=${r.fakeY}  "${r.text}"`));
+  } else {
+    console.table(d.rows.map(r => ({ row: r.index, fakeY: r.fakeY, region: r.regionLabel, text: r.text, fontSize: r.fontSize, fontName: r.fontName })));
+  }
+  console.group(`Parsed entries (${d.entries.length})`);
+  d.entries.forEach((entry, i) => {
+    console.group(`Entry ${i}: "${entry._textName ?? '(no name)'}"`);
+    for (const [k, v] of Object.entries(entry)) {
+      if (k.endsWith('__html')) continue;
+      const display = typeof v === 'string' && v.length > 120 ? v.slice(0, 120) + '…' : v;
+      console.log(`  ${k}:`, display);
+    }
+    console.groupEnd();
+  });
+  console.groupEnd();
+  console.groupEnd();
+};
 
 /**
  * Apply a rule to a loaded PDF document.
@@ -55,30 +87,48 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
   const standaloneTextItems = [];
   const textFields = rule.textFields?.length ? rule.textFields : null;
 
-  // Combine all non-standalone text regions into one Y-offset pool so that
-  // multi-column stat blocks and multi-region prose descriptions are parsed as
-  // a single continuous stream rather than isolated fragments.
-  // Regions are sorted by page then Y so items flow top-to-bottom, left-to-right.
+  // Combine all non-standalone text regions into one continuous stream so that
+  // multi-column stat blocks and multi-region prose descriptions flow as a single
+  // sequence. Regions are processed in draw order (per page) so the user controls
+  // the reading order by painting boxes in the intended sequence.
   const nonStandaloneRegions = textRegions.filter(r => !r.standalone);
   const standaloneRegions    = textRegions.filter(r =>  r.standalone);
 
   if (nonStandaloneRegions.length > 0) {
-    const sorted = [...nonStandaloneRegions].sort((a, b) => a.page - b.page || a.y - b.y);
-    let yOffset = 0;
+    // Sort by page only — preserve draw order within the same page so that
+    // multi-column text regions flow in the order the user painted them.
+    const sorted = [...nonStandaloneRegions].sort((a, b) => a.page - b.page);
+
+    // Group each region's items into rows individually (correct intra-region
+    // ordering), then stamp sequential fake-Y values so that downstream
+    // groupIntoRows() sees one flat, correctly-ordered stream regardless of
+    // PDF coordinate direction or overlapping page coordinates between regions.
     const allItems = [];
+    let fakeY = 0;
+    const _dbgRows = [];
+    const _dbgRegionOrder = [];
+    let _dbgRowIdx = 0;
     for (const region of sorted) {
       const page = pages.find(p => p.pageNum === region.page);
       if (!page) continue;
       const regionItems = filterItemsToRegion(page.items, region);
-      for (const item of regionItems) {
-        allItems.push({ ...item, y: item.y + yOffset });
-      }
-      if (regionItems.length) {
-        yOffset += Math.max(...regionItems.map(i => i.y)) + 50;
+      const regionLabel = `p${region.page} (${Math.round(region.x)},${Math.round(region.y)} ${Math.round(region.w)}×${Math.round(region.h)})`;
+      _dbgRegionOrder.push(regionLabel);
+      const rows = groupIntoRows(regionItems);
+      for (const row of rows) {
+        const sorted2 = [...row.items].sort((a, b) => a.x - b.x);
+        const rowText = sorted2.map(i => i.text).join(' ').trim();
+        const rep = sorted2[0];
+        _dbgRows.push({ index: _dbgRowIdx++, fakeY, regionLabel, text: rowText, fontSize: rep?.fontSize ?? '', fontName: rep?.fontName ?? '' });
+        for (const item of row.items) {
+          allItems.push({ ...item, y: fakeY });
+        }
+        fakeY += 100;
       }
     }
     if (allItems.length) {
       const entries = parseTextRegion(allItems, rule);
+      globalThis._DIB_lastStreamDebug = { regionCount: sorted.length, regionOrder: _dbgRegionOrder, rows: _dbgRows, items: allItems, entries };
       const nameMap = new Map();
       for (const entry of entries) {
         nameMap.set(normalizeItemName(entry._textName ?? ''), entry);
@@ -121,7 +171,7 @@ function applyRuleWithRegions(rule, pages, regions, textRegions = []) {
       if (!rowText.trim()) continue;
       if (skipRe?.test(rowText)) continue;
 
-      const item = extractAttributes(cells, regularAttrs, rule);
+      const item = extractAttributes(cells, regularAttrs);
       if (!item) continue;
 
       // Inject text region data into matched table rows
@@ -317,7 +367,7 @@ function parseTable(items, rule) {
     if (!rowText) continue;
     if (skipRe?.test(rowText)) continue;
 
-    const item = extractAttributes(cells, rule.attributes, rule);
+    const item = extractAttributes(cells, rule.attributes);
     if (item) results.push(item);
   }
 
@@ -328,7 +378,7 @@ function parseTable(items, rule) {
 // Attribute extraction
 // ---------------------------------------------------------------------------
 
-function extractAttributes(context, attributeRules, rule) {
+function extractAttributes(context, attributeRules) {
   const result = {};
   let hasData = false;
 

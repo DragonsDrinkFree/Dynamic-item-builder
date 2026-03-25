@@ -10,7 +10,7 @@ import {
   loadPDF, extractPages, parsePageString, mergePageItems, filterItemsToRegion,
   collectTableRegionItems, detectTables, renderPageToCanvas,
   applyManualHeaderOverrides, applyColumnMerges, applyColumnSplits,
-  parseTextRegion, extractRegionFonts
+  parseTextRegion, extractRegionFonts, groupIntoRows
 } from '../pdf-parser.js';
 import { applyRule }   from '../rule-engine.js';
 import { buildItems }  from '../item-builder.js';
@@ -1030,18 +1030,19 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       const standaloneRegions    = textRegions.filter(r =>  r.standalone);
 
       if (nonStandaloneRegions.length > 0) {
-        const sorted = [...nonStandaloneRegions].sort((a, b) => a.page - b.page || a.y - b.y);
-        let yOffset = 0;
+        const sorted = [...nonStandaloneRegions].sort((a, b) => a.page - b.page);
         const allTextItems = [];
+        let fakeY = 0;
         for (const region of sorted) {
           const page = pages.find(p => p.pageNum === region.page);
           if (!page) continue;
           const regionItems = filterItemsToRegion(page.items, region);
-          for (const item of regionItems) {
-            allTextItems.push({ ...item, y: item.y + yOffset });
-          }
-          if (regionItems.length) {
-            yOffset += Math.max(...regionItems.map(i => i.y)) + 50;
+          const rows = groupIntoRows(regionItems);
+          for (const row of rows) {
+            for (const item of row.items) {
+              allTextItems.push({ ...item, y: fakeY });
+            }
+            fakeY += 100;
           }
         }
         if (allTextItems.length) {
