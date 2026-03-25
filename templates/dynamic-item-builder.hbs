@@ -26,7 +26,7 @@
               {{#unless rules.length}}disabled{{/unless}}>
         <i class="fas fa-download"></i> Export Rules
       </button>
-      <button type="button" data-action="refreshPreview" class="dib-btn"
+      <button type="button" data-action="refreshPreview" class="dib-btn{{#if previewDirty}} dib-btn-dirty{{/if}}"
               {{#unless hasPdf}}disabled{{/unless}}>
         <i class="fas fa-sync-alt {{#if previewLoading}}fa-spin{{/if}}"></i> Refresh
       </button>
@@ -154,10 +154,6 @@
           <span class="dib-tab-badge dib-tab-badge-text">{{textRegionCount}}X</span>
           {{/if}}
         </button>
-        <button class="dib-tab {{#if itemPlannerTabActive}}active{{/if}}" data-center-tab="item-planner">
-          <i class="fas fa-list-ul"></i>
-          <span>Item Planner</span>
-        </button>
       </div>
 
       {{!-- ── PDF PLANNER TAB ── --}}
@@ -189,9 +185,6 @@
             </button>
           </div>
 
-          <button class="dib-btn" data-action="autoDetectRegions" title="Auto-detect tables">
-            <i class="fas fa-magic"></i> Auto-detect
-          </button>
         </div>
 
         {{!-- Planner content: canvas + sidebar --}}
@@ -253,87 +246,6 @@
         {{/if}}
       </div>{{!-- /#dib-center-planner --}}
 
-      {{!-- ── ITEM PLANNER TAB ── --}}
-      <div class="dib-tab-panel {{#if itemPlannerTabActive}}active{{/if}}" id="dib-center-item-planner">
-        <div class="rule-editor-inner">
-
-          {{!-- Detection patterns --}}
-          <fieldset class="dib-fieldset">
-            <legend>Detection Patterns</legend>
-
-            <div class="dib-field">
-              <label>Header Row Pattern
-                <span class="dib-hint">Regex matching any text in the column header row</span>
-              </label>
-              <input type="text" data-field="headerPattern"
-                     value="{{selectedRule.headerPattern}}"
-                     placeholder="e.g. Weapon|Name|Item">
-            </div>
-
-          </fieldset>
-
-          {{!-- Attribute mappings --}}
-          <div class="dib-attr-mapping-section">
-            <div class="dib-attr-section-header">
-              <span class="dib-attr-section-title">Attribute Mappings</span>
-              {{#if suggestionCount}}
-              <button type="button" class="dib-btn dib-btn-sm dib-btn-primary"
-                      data-action="linkAllSuggestions"
-                      title="Accept all {{suggestionCount}} suggestions">
-                <i class="fas fa-link"></i> Link All ({{suggestionCount}})
-              </button>
-              {{/if}}
-            </div>
-            {{#if selectedRule.itemType}}
-            <div class="dib-attr-list">
-              {{#each attributeList}}
-              <div class="dib-attr-row dib-attr-status-{{this.status}}">
-                <span class="dib-attr-dot" title="{{this.status}}"></span>
-                <button type="button" class="dib-attr-name-btn"
-                        data-action="openAttributeMenu"
-                        data-foundry-field="{{this.path}}"
-                        title="Click to inspect or edit mapping for {{this.path}}">
-                  <span class="dib-attr-label">{{this.shortLabel}}</span>
-                  <span class="dib-attr-path">{{this.path}}</span>
-                </button>
-                <div class="dib-attr-info">
-                  {{#if this.linked}}
-                  <span class="dib-attr-col-tag" title="Linked to: {{this.columnHeader}}">
-                    <i class="fas fa-link"></i> {{this.columnHeader}}
-                  </span>
-                  {{else if this.suggested}}
-                  <span class="dib-attr-sugg-col" title="Suggested: {{this.suggestedColumn}}">
-                    <i class="fas fa-magic"></i> {{this.suggestedColumn}}
-                    <span class="dib-sugg-score-badge dib-sugg-{{this.suggestedScoreClass}}">{{this.suggestedScoreLabel}}</span>
-                  </span>
-                  <button type="button" class="dib-attr-accept-btn dib-btn dib-btn-sm"
-                          data-action="acceptSuggestion"
-                          data-column-header="{{this.suggestedColumn}}"
-                          data-suggested-field="{{this.path}}"
-                          title="Accept suggestion">
-                    <i class="fas fa-check"></i>
-                  </button>
-                  {{else if this.inPreview}}
-                  <span class="dib-attr-in-preview" title="Shown as manual column in Item Preview">
-                    <i class="fas fa-eye"></i>
-                  </span>
-                  {{/if}}
-                </div>
-              </div>
-              {{else}}
-              <p class="dib-attr-empty"><i class="fas fa-info-circle"></i> No attributes for this item type.</p>
-              {{/each}}
-            </div>
-            {{else}}
-            <p class="dib-attr-empty">
-              <i class="fas fa-info-circle"></i>
-              Select an Item Type in the top bar to see attribute mappings.
-            </p>
-            {{/if}}
-          </div>
-
-        </div>{{!-- /.rule-editor-inner --}}
-      </div>{{!-- /#dib-center-item-planner --}}
 
       {{else}}
       {{!-- No rule selected --}}
@@ -399,6 +311,12 @@
                         title="Manually name the columns for this table">
                   <i class="fas fa-pencil-alt"></i> Create Headers
                 </button>
+                {{#if @root.suggestionCount}}
+                <button type="button" class="dib-btn dib-btn-sm" data-action="linkAllSuggestions"
+                        title="Accept all suggested attribute mappings">
+                  <i class="fas fa-magic"></i> Link All Suggested
+                </button>
+                {{/if}}
               </div>
               <div class="scan-table-scroll">
                 <table class="scan-table">
@@ -411,6 +329,7 @@
                           data-table-id="{{../id}}"
                           title="Click to map or set header pattern">
                         {{#if this.header}}{{this.header}}{{else}}<em class="dib-unlabeled">(unlabeled)</em>{{/if}}
+                        {{#if this.mappedField}}<span class="dib-mapped-field">({{this.mappedField}})</span>{{/if}}
                       </th>
                       {{/each}}
                     </tr>
@@ -465,7 +384,7 @@
           {{!-- Field Rules --}}
           <div class="dib-field-rules-section" data-fonts="{{textFontsJson}}">
             <div class="dib-field-rules-header">
-              <button class="dib-btn dib-btn-sm" data-action="refreshPreview"
+              <button class="dib-btn dib-btn-sm{{#if previewDirty}} dib-btn-dirty{{/if}}" data-action="refreshPreview"
                       title="Apply field rules and refresh text preview">
                 <i class="fas fa-sync-alt"></i> Refresh
               </button>
@@ -726,6 +645,11 @@
                 {{else}}
                 <span class="preview-count-badge empty">—</span>
                 {{/if}}
+                <button type="button" class="dib-btn dib-btn-sm"
+                        data-action="addPreviewColumn" data-rule-id="{{this.id}}"
+                        title="Add an unlinked attribute column to preview">
+                  <i class="fas fa-plus"></i> Add Column
+                </button>
               </div>
 
               {{#if this.items.length}}
