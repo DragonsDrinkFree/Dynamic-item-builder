@@ -1839,6 +1839,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         this.#snapPlannerPage();
         ui.notifications.info(`Imported ${imported.length} rule(s) from "${file.name}".`);
         this.render();
+        await this.#runPreview();
       } catch (err) {
         ui.notifications.error(`Import failed: ${err.message}`);
       }
