@@ -1,3 +1,9 @@
+# v1.2.4
+
+# Minor
+- Fixed bug that caused PDF canvas to get stuck on cover when loading rules.
+
+
 # v1.2.3
 
 ## Major
