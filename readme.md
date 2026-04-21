@@ -1,6 +1,9 @@
 # Install
 Copy this file into your add-on module installer's manifest path
-https://github.com/DragonsDrinkFree/dynamic-item-builder/releases/latest/download/module.json
+
+Install: https://github.com/DragonsDrinkFree/dynamic-item-builder/releases/latest/download/module.json
+
+Guide/Overview: https://www.youtube.com/watch?v=KW7u3LcbLLA
 # Overview
 This module allows you to upload a PDF and extract table information with the ability to map table results to Foundry System data.
 
@@ -8,7 +11,7 @@ it is system agnostic, and intended to be extremely flexible, but may not be 100
 
 ## User Guide
 Included in this module is a Foundry Compendium which will act as a getting started guide. It is highly recommended you start there!
-Guide/Overview: https://www.youtube.com/watch?v=KW7u3LcbLLA
+
 <img width="1692" height="857" alt="image" src="https://github.com/user-attachments/assets/12978b51-111e-4264-a796-e0e879b42bf6" />
 
 
