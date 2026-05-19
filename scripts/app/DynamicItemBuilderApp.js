@@ -165,6 +165,22 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
   }
 
   // -------------------------------------------------------------------------
+  // Close confirmation
+  // -------------------------------------------------------------------------
+
+  async close(options = {}) {
+    const confirmed = await foundry.applications.api.DialogV2.confirm({
+      window: { title: 'Close Item Builder' },
+      content: '<p>Are you sure you want to close? Any unsaved work will be lost.</p>',
+      yes: { label: 'Close', icon: 'fas fa-times' },
+      no:  { label: 'Cancel', icon: 'fas fa-arrow-left' },
+      rejectClose: false
+    });
+    if (!confirmed) return;
+    return super.close(options);
+  }
+
+  // -------------------------------------------------------------------------
   // Rendering
   // -------------------------------------------------------------------------
 
