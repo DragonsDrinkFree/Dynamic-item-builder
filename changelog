@@ -1,3 +1,7 @@
+# v1.3.0
+
+## Major
+- Added a "Map Unlisted Field" Option to field mapping. This allows for mapping of fields that aren't exposed to the DiB module by the system's item definitions (Some fields are added by the system after their definitions are set in the system.)
 # v1.2.6
 
 ## Minor
