@@ -6,7 +6,7 @@
  * Right panel  : previews — Table Preview | Text Preview | Item Preview
  */
 
-import { loadPDF, renderPageToCanvas, parsePageString } from '../pdf-parser.js';
+import { loadPDF, renderPageToCanvas, parsePageString, normalizeItemName } from '../pdf-parser.js';
 import { applyRule }   from '../rule-engine.js';
 import { buildItems }  from '../item-builder.js';
 import { escapeRegex, getIgnoredKeySet } from '../utils.js';
@@ -1529,6 +1529,14 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       && this._cellSelRuleId === ruleId
       && this.#isCellSelected(ruleId, dibKey, field);
 
+    const rule        = this._rules.find(r => r.id === ruleId);
+    const isJoinField = field === 'name' && (rule?.textFields?.length > 0);
+    const getItemNormName = (rid, dk) => {
+      const idx  = parseInt(dk.slice(1));
+      const item = this._preview[rid]?.[idx];
+      return normalizeItemName(item?.name ?? '');
+    };
+
     const menuItems = [];
 
     if (inMultiSel) {
@@ -1574,6 +1582,71 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       }
     }
 
+    if (isJoinField) {
+      menuItems.push({ separator: true });
+      if (inMultiSel) {
+        menuItems.push({
+          icon: 'fa-link',
+          label: `Manual Join Selected (${this._cellSel.length} cells)`,
+          action: () => {
+            const normNames = this._cellSel.map(c => getItemNormName(c.ruleId, c.dibKey));
+            this.#showManualJoinMenu(event, rule, normNames);
+          }
+        });
+      } else {
+        menuItems.push({
+          icon: 'fa-link',
+          label: 'Manual Join',
+          action: () => this.#showManualJoinMenu(event, rule, [getItemNormName(ruleId, dibKey)])
+        });
+      }
+      const normName   = getItemNormName(ruleId, dibKey);
+      const hasManJoin = !!rule?.manualJoins?.[normName];
+      if (hasManJoin) {
+        menuItems.push({
+          icon: 'fa-unlink',
+          label: 'Clear Manual Join',
+          action: () => {
+            if (inMultiSel) {
+              for (const c of this._cellSel) delete rule.manualJoins[getItemNormName(c.ruleId, c.dibKey)];
+            } else {
+              delete rule.manualJoins[normName];
+            }
+            this.#schedulePreviewAndRender();
+          }
+        });
+      }
+    }
+
+    this.#showContextMenu(event, menuItems);
+  }
+
+  #showManualJoinMenu(event, rule, normItemNames) {
+    const textEntries = Object.values(this._textScanData ?? {}).flat();
+    const names = [...new Set(textEntries.map(e => e._textName).filter(Boolean))];
+    if (!names.length) {
+      ui.notifications.warn('No text entries found — run a scan first.');
+      return;
+    }
+    const menuItems = [
+      { heading: 'Join to text entry:' },
+      { filterInput: true }
+    ];
+    for (const name of names) {
+      menuItems.push({
+        icon: 'fa-link',
+        label: name,
+        filterable: true,
+        action: () => {
+          const normTextName = normalizeItemName(name);
+          rule.manualJoins ??= {};
+          for (const normItemName of normItemNames) {
+            rule.manualJoins[normItemName] = normTextName;
+          }
+          this.#schedulePreviewAndRender();
+        }
+      });
+    }
     this.#showContextMenu(event, menuItems);
   }
 

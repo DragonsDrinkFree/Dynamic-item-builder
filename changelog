@@ -1,3 +1,8 @@
+# v1.3.1
+
+## Minor
+- Fixed error where join's between table and text results were renaming items.
+- Implemented new Manual Join option from Item Preview from the name field to join items that aren't perfectly named for joining.
 # v1.3.0
 
 ## Major
