@@ -176,7 +176,7 @@ function extractItemsFromTables(allTables, regionTextMaps, rule, skipRe) {
             const manualKey = rule.manualJoins?.[normName];
             const matched   = (manualKey ? nameMap.get(manualKey) : null)
                            ?? findTextMatch(normName, nameMap);
-            if (matched) applyTextFieldValues(item, matched, textFields);
+            if (matched) applyTextFieldValues(item, matched, textFields, !!manualKey);
           }
         } else if (virtualAttrs.length) {
           for (const vAttr of virtualAttrs) {
@@ -261,10 +261,11 @@ function extractStandaloneItems(standaloneTextItems, textRegions, rule) {
  * @param {Array}  textFields — rule.textFields definitions
  * @returns {boolean} true if any value was set
  */
-function applyTextFieldValues(item, entry, textFields) {
+function applyTextFieldValues(item, entry, textFields, skipJoinTarget = false) {
   let hasData = false;
   for (const field of textFields) {
     if (!field.foundryAttr) continue;
+    if (skipJoinTarget && field.isJoinTarget) continue;
     const htmlVal  = entry[field.id + '__html'] ?? null;
     const rawValue = htmlVal ?? String(entry[field.id] ?? '').trim();
     if (rawValue !== '') { hasData = true; setNestedValue(item, field.foundryAttr, rawValue); }
