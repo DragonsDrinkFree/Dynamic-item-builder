@@ -96,7 +96,11 @@ export function enrichTextEntries(entries, columns, scanData, nameAttr) {
             : row.cells[0];
           if (!nameCell) continue;
           const normRow = normalizeItemName(nameCell.value);
-          if (normRow === normEntry || normRow.includes(normEntry) || normEntry.includes(normRow)) {
+          const shorter = normRow.length <= normEntry.length ? normRow : normEntry;
+          const longer  = normRow.length <= normEntry.length ? normEntry : normRow;
+          const escaped = shorter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          if (normRow === normEntry ||
+              (shorter.includes(' ') && new RegExp(`(?:^|\\s)${escaped}(?:\\s|$)`).test(longer))) {
             found = true; break;
           }
         }

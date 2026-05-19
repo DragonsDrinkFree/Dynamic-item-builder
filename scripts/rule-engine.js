@@ -303,9 +303,14 @@ function findTextMatch(normName, nameMap) {
   if (!normName) return null;
   // Exact match
   if (nameMap.has(normName)) return nameMap.get(normName);
-  // Substring: table name contained in text name, or vice versa
+  // Substring: the shorter string must be multi-word and must match at word boundaries
+  // so that "suit" never matches "flight suit", and "jack" never matches "jacket".
   for (const [key, entry] of nameMap) {
-    if (key.includes(normName) || normName.includes(key)) return entry;
+    const shorter = key.length <= normName.length ? key : normName;
+    const longer  = key.length <= normName.length ? normName : key;
+    if (!shorter.includes(' ')) continue;
+    const escaped = shorter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`(?:^|\\s)${escaped}(?:\\s|$)`).test(longer)) return entry;
   }
   return null;
 }
