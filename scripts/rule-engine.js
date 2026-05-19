@@ -173,14 +173,18 @@ function extractItemsFromTables(allTables, regionTextMaps, rule, skipRe) {
 
         if (textFields) {
           for (const [, nameMap] of regionTextMaps) {
-            const matched = findTextMatch(normName, nameMap);
+            const manualKey = rule.manualJoins?.[normName];
+            const matched   = (manualKey ? nameMap.get(manualKey) : null)
+                           ?? findTextMatch(normName, nameMap);
             if (matched) applyTextFieldValues(item, matched, textFields);
           }
         } else if (virtualAttrs.length) {
           for (const vAttr of virtualAttrs) {
             const nameMap = regionTextMaps.get(vAttr.textRegionId) ?? regionTextMaps.get('_combined');
             if (!nameMap) continue;
-            const matched = findTextMatch(normName, nameMap);
+            const manualKey = rule.manualJoins?.[normName];
+            const matched   = (manualKey ? nameMap.get(manualKey) : null)
+                           ?? findTextMatch(normName, nameMap);
             if (!matched) continue;
             const rawValue = matched[vAttr.columnHeader] ?? '';
             const value = applyTransform(String(rawValue).trim(), vAttr.transform);

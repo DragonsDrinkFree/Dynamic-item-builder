@@ -50,7 +50,8 @@ export function makeDefaultRule() {
     ignoredItems:        [],
     regions:             [],
     manualColumns:       [],
-    manualHeaders:       {}
+    manualHeaders:       {},
+    manualJoins:         {}
   };
 }
 
