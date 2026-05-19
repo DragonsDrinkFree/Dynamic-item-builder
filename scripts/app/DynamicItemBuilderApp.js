@@ -1017,7 +1017,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
         rule.textFieldSplitAttrs[sourceId] ??= [];
         rule.textFieldSplitAttrs[sourceId][splitIndex] = path;
         this.#schedulePreviewAndRender();
-      });
+      }, th);
       if (currentAttr) {
         menuItems.push({ separator: true });
         menuItems.push({ icon: 'fa-times', label: 'Clear attribute mapping', action: () => {
@@ -1072,7 +1072,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     appendAttributeMappingMenu(menuItems, tf.header || 'field', this._cachedAttributePaths, (path) => {
       tf.foundryAttr = path;
       this.#schedulePreviewAndRender();
-    });
+    }, th);
     if (tf.foundryAttr) {
       menuItems.push({ separator: true });
       menuItems.push({
@@ -1236,7 +1236,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       appendAttributeMappingMenu(menuItems, col, this._cachedAttributePaths, (path) => {
         this.#mapColumnToField(rule, col, path);
         this.render();
-      });
+      }, headerCell ?? dataCell);
     }
     this.#showContextMenu(event, menuItems);
   }

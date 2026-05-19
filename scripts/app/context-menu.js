@@ -7,6 +7,9 @@
  *   { filterInput: true }                — renders a search input; subsequent filterable items go inside a scrollable list
  *   { label, icon?, action, filterable? } — clickable button
  */
+
+import { createPopover } from './popovers.js';
+
 export function showContextMenu(event, items) {
   document.querySelector('.dib-context-menu')?.remove();
   if (!items.length) return;
@@ -97,11 +100,34 @@ export function showContextMenu(event, items) {
  * @param {string}   label          — what's being mapped (e.g. column header or field name)
  * @param {Array}    attributePaths — [{ path, label }]
  * @param {Function} onSelect       — (attrPath: string) => void
+ * @param {Element}  [anchor]       — element to position the "Map Unlisted Field" popover near
  */
-export function appendAttributeMappingMenu(menuItems, label, attributePaths, onSelect) {
+export function appendAttributeMappingMenu(menuItems, label, attributePaths, onSelect, anchor) {
   if (!attributePaths?.length) return;
   menuItems.push({ separator: true });
   menuItems.push({ heading: `Map "${label}" to field:` });
+  menuItems.push({
+    icon: 'fa-pencil',
+    label: 'Map Unlisted Field…',
+    action: () => {
+      createPopover({
+        anchor: anchor ?? document.body,
+        className: 'dib-cell-popover',
+        innerHTML: `
+          <div class="dib-cpop-label">Field path:</div>
+          <input type="text" class="dib-cpop-input" placeholder="e.g. system.description">
+          <div class="dib-cpop-buttons">
+            <button class="dib-cpop-save">Apply</button>
+            <button class="dib-cpop-cancel">Cancel</button>
+          </div>`,
+        onSave: (popover) => {
+          const path = popover.querySelector('.dib-cpop-input').value.trim();
+          if (path) onSelect(path);
+        },
+        onReady: (popover) => popover.querySelector('.dib-cpop-input').focus()
+      });
+    }
+  });
   menuItems.push({ filterInput: true });
   for (const attr of attributePaths) {
     menuItems.push({
