@@ -249,7 +249,8 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       // Attribute mapping list
       suggestionCount,
       previewHasContent: previewSummary.some(r => (r.items ?? []).length > 0),
-      previewDirty: this._previewDirty,
+      previewDirty:     this._previewDirty,
+      rulesAwaitingPdf: !this._pdf && this._rules.length > 0,
       // Planner page navigation — restrict to pages defined in rule
       plannerAtFirst: !this.#plannerPages().length || this._plannerPage <= this.#plannerPages()[0],
       plannerAtLast:  !this.#plannerPages().length || this._plannerPage >= this.#plannerPages()[this.#plannerPages().length - 1]
@@ -871,6 +872,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       this.#snapPlannerPage();
       ui.notifications.info(`Loaded "${file.name}" — ${this._pdfPages} pages.`);
       this.render();
+      if (this._rules.length) await this.#runPreview();
     } catch (err) {
       ui.notifications.error(`Failed to load PDF: ${err.message}`);
       console.error('Dynamic Item Builder | PDF load error', err);

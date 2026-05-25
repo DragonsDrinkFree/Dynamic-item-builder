@@ -17,6 +17,12 @@
           <i class="fas fa-times-circle"></i> No PDF loaded
         {{/if}}
       </span>
+      {{#if rulesAwaitingPdf}}
+        <span class="dib-awaiting-pdf">
+          <i class="fas fa-hourglass-half"></i>
+          {{rules.length}} rule(s) loaded — select a PDF to run the preview
+        </span>
+      {{/if}}
     </div>
     <div class="dib-header-right">
       <button type="button" data-action="importRules" class="dib-btn">
