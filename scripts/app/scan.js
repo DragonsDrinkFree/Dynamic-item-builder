@@ -159,10 +159,12 @@ export function buildTextScanContext(rule, textScanData, textRegionFonts, scanDa
     for (const e of allEntries) {
       for (const k of Object.keys(e)) { if (!k.startsWith('_')) extraKeys.add(k); }
     }
+    const legacyAttrs     = rule.legacyTextFieldAttrs ?? {};
+    const legacyJoinCol   = rule.legacyJoinTarget ?? '_textName';
     columns = [
-      { id: '_textName',        header: 'Name',        isJoinTarget: true,  foundryAttr: '' },
-      ...[...extraKeys].map(k => ({ id: k, header: k, isJoinTarget: false, foundryAttr: '' })),
-      { id: '_textDescription', header: 'Description',  isJoinTarget: false, foundryAttr: '' }
+      { id: '_textName',        header: 'Name',        isJoinTarget: legacyJoinCol === '_textName',        foundryAttr: legacyAttrs['_textName']        ?? '' },
+      ...[...extraKeys].map(k => ({ id: k, header: k, isJoinTarget: legacyJoinCol === k,                  foundryAttr: legacyAttrs[k]                   ?? '' })),
+      { id: '_textDescription', header: 'Description',  isJoinTarget: legacyJoinCol === '_textDescription', foundryAttr: legacyAttrs['_textDescription'] ?? '' }
     ];
   }
 

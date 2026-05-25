@@ -34,6 +34,13 @@ export function buildPreviewSummary(rules, preview, cellOverrides) {
         linkedFields.add(tf.foundryAttr);
       }
     }
+    // Append legacy (rudimentary) text region field mappings
+    for (const [, foundryAttr] of Object.entries(r.legacyTextFieldAttrs ?? {})) {
+      if (foundryAttr && !linkedFields.has(foundryAttr)) {
+        cols.push({ field: foundryAttr, label: foundryAttr.split('.').pop() });
+        linkedFields.add(foundryAttr);
+      }
+    }
 
     const ignoredKeys = getIgnoredKeySet(r);
     const rawItems    = preview[r.id] ?? null;

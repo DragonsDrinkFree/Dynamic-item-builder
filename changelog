@@ -1,4 +1,12 @@
-# v1.3.1
+# v1.4.0
+
+## Major
+
+- Added ability to set join targets and link notes with default detected columns in text regions.
+
+## Minor
+
+# v1.3.2
 
 ## Minor
 - Fixed error where join's between table and text results were renaming items.

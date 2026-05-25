@@ -1030,7 +1030,40 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     }
 
     const tf = (rule.textFields ?? []).find(f => f.id === fieldId);
-    if (!tf) return;
+
+    // Rudimentary (legacy) column — no textField entry; show join target + attribute mapping
+    if (!tf) {
+      const isLegacyJoin = (rule.legacyJoinTarget ?? '_textName') === fieldId;
+      if (isLegacyJoin) {
+        menuItems.push({
+          icon: 'fa-unlink',
+          label: 'Remove Join Target',
+          action: () => { delete rule.legacyJoinTarget; this.#schedulePreviewAndRender(); }
+        });
+      } else {
+        menuItems.push({
+          icon: 'fa-link',
+          label: 'Set as Join Target',
+          action: () => { rule.legacyJoinTarget = fieldId; this.#schedulePreviewAndRender(); }
+        });
+      }
+      menuItems.push({ separator: true });
+      const currentAttr = rule.legacyTextFieldAttrs?.[fieldId] ?? '';
+      appendAttributeMappingMenu(menuItems, th.textContent.trim() || fieldId, this._cachedAttributePaths, (path) => {
+        rule.legacyTextFieldAttrs ??= {};
+        rule.legacyTextFieldAttrs[fieldId] = path;
+        this.#schedulePreviewAndRender();
+      }, th);
+      if (currentAttr) {
+        menuItems.push({ separator: true });
+        menuItems.push({ icon: 'fa-times', label: 'Clear attribute mapping', action: () => {
+          delete rule.legacyTextFieldAttrs[fieldId];
+          this.render();
+        }});
+      }
+      this.#showContextMenu(event, menuItems);
+      return;
+    }
 
     // Split Field option
     const hasSplit = rule.textFieldSplits?.[fieldId];

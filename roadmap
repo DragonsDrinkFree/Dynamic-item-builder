@@ -1,1 +1,4 @@
-Roadmap up to date.
+# Improvements
+
+## Text Region Defaults
+- Allow mapping of default text-region results in the case that they detect correctly.
