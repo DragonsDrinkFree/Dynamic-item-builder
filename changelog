@@ -3,6 +3,8 @@
 ## Major
 
 - Added ability to set join targets and link notes with default detected columns in text regions.
+- Updated the way importing rules works to help make it less prone to error if users do things in different orders.
+
 
 ## Minor
 
