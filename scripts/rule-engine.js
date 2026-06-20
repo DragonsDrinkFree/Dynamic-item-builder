@@ -119,9 +119,11 @@ function parseAllTextRegions(pages, textRegions, rule) {
     if (allItems.length) {
       const entries = parseTextRegion(allItems, rule);
       globalThis._DIB_lastStreamDebug = { regionCount: nonStandaloneRegions.length, regionOrder: debugRegionOrder, rows: debugRows, items: allItems, entries };
+      const legacyJoinKey = rule.legacyJoinTarget ?? '_textName';
       const nameMap = new Map();
       for (const entry of entries) {
-        nameMap.set(normalizeItemName(entry._textName ?? ''), entry);
+        const keyVal = entry[legacyJoinKey] ?? entry._textName ?? '';
+        nameMap.set(normalizeItemName(keyVal), entry);
       }
       regionTextMaps.set('_combined', nameMap);
     }
@@ -176,7 +178,17 @@ function extractItemsFromTables(allTables, regionTextMaps, rule, skipRe) {
             const manualKey = rule.manualJoins?.[normName];
             const matched   = (manualKey ? nameMap.get(manualKey) : null)
                            ?? findTextMatch(normName, nameMap);
-            if (matched) applyTextFieldValues(item, matched, textFields);
+            if (matched) applyTextFieldValues(item, matched, textFields, !!manualKey);
+          }
+        } else if (rule.legacyTextFieldAttrs && Object.keys(rule.legacyTextFieldAttrs).length > 0) {
+          for (const [, nameMap] of regionTextMaps) {
+            const matched = findTextMatch(normName, nameMap);
+            if (!matched) continue;
+            for (const [colId, foundryAttr] of Object.entries(rule.legacyTextFieldAttrs)) {
+              if (!foundryAttr) continue;
+              const value = String(matched[colId] ?? '').trim();
+              if (value) setNestedValue(item, foundryAttr, value);
+            }
           }
         } else if (virtualAttrs.length) {
           for (const vAttr of virtualAttrs) {
@@ -261,10 +273,11 @@ function extractStandaloneItems(standaloneTextItems, textRegions, rule) {
  * @param {Array}  textFields — rule.textFields definitions
  * @returns {boolean} true if any value was set
  */
-function applyTextFieldValues(item, entry, textFields) {
+function applyTextFieldValues(item, entry, textFields, skipJoinTarget = false) {
   let hasData = false;
   for (const field of textFields) {
     if (!field.foundryAttr) continue;
+    if (skipJoinTarget && field.isJoinTarget) continue;
     const htmlVal  = entry[field.id + '__html'] ?? null;
     const rawValue = htmlVal ?? String(entry[field.id] ?? '').trim();
     if (rawValue !== '') { hasData = true; setNestedValue(item, field.foundryAttr, rawValue); }

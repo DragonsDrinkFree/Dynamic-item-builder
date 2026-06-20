@@ -69,6 +69,18 @@
 .dib-pdf-status.loaded {
   color: var(--dib-success);
 }
+.dib-awaiting-pdf {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--dib-text-muted);
+  opacity: 0.9;
+}
+.dib-awaiting-pdf i {
+  color: var(--dib-accent);
+}
 
 /* ──────────────────────────────────────
    BUTTONS

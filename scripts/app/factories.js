@@ -49,9 +49,10 @@ export function makeDefaultRule() {
     attributes:          [],
     ignoredItems:        [],
     regions:             [],
-    manualColumns:       [],
-    manualHeaders:       {},
-    manualJoins:         {}
+    manualColumns:          [],
+    manualHeaders:          {},
+    manualJoins:            {},
+    legacyTextFieldAttrs:   {}
   };
 }
 

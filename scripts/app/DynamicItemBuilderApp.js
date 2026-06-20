@@ -249,7 +249,8 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       // Attribute mapping list
       suggestionCount,
       previewHasContent: previewSummary.some(r => (r.items ?? []).length > 0),
-      previewDirty: this._previewDirty,
+      previewDirty:     this._previewDirty,
+      rulesAwaitingPdf: !this._pdf && this._rules.length > 0,
       // Planner page navigation — restrict to pages defined in rule
       plannerAtFirst: !this.#plannerPages().length || this._plannerPage <= this.#plannerPages()[0],
       plannerAtLast:  !this.#plannerPages().length || this._plannerPage >= this.#plannerPages()[this.#plannerPages().length - 1]
@@ -871,6 +872,7 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
       this.#snapPlannerPage();
       ui.notifications.info(`Loaded "${file.name}" — ${this._pdfPages} pages.`);
       this.render();
+      if (this._rules.length) await this.#runPreview();
     } catch (err) {
       ui.notifications.error(`Failed to load PDF: ${err.message}`);
       console.error('Dynamic Item Builder | PDF load error', err);
@@ -1030,7 +1032,40 @@ export class DynamicItemBuilderApp extends HandlebarsApplicationMixin(Applicatio
     }
 
     const tf = (rule.textFields ?? []).find(f => f.id === fieldId);
-    if (!tf) return;
+
+    // Rudimentary (legacy) column — no textField entry; show join target + attribute mapping
+    if (!tf) {
+      const isLegacyJoin = (rule.legacyJoinTarget ?? '_textName') === fieldId;
+      if (isLegacyJoin) {
+        menuItems.push({
+          icon: 'fa-unlink',
+          label: 'Remove Join Target',
+          action: () => { delete rule.legacyJoinTarget; this.#schedulePreviewAndRender(); }
+        });
+      } else {
+        menuItems.push({
+          icon: 'fa-link',
+          label: 'Set as Join Target',
+          action: () => { rule.legacyJoinTarget = fieldId; this.#schedulePreviewAndRender(); }
+        });
+      }
+      menuItems.push({ separator: true });
+      const currentAttr = rule.legacyTextFieldAttrs?.[fieldId] ?? '';
+      appendAttributeMappingMenu(menuItems, th.textContent.trim() || fieldId, this._cachedAttributePaths, (path) => {
+        rule.legacyTextFieldAttrs ??= {};
+        rule.legacyTextFieldAttrs[fieldId] = path;
+        this.#schedulePreviewAndRender();
+      }, th);
+      if (currentAttr) {
+        menuItems.push({ separator: true });
+        menuItems.push({ icon: 'fa-times', label: 'Clear attribute mapping', action: () => {
+          delete rule.legacyTextFieldAttrs[fieldId];
+          this.render();
+        }});
+      }
+      this.#showContextMenu(event, menuItems);
+      return;
+    }
 
     // Split Field option
     const hasSplit = rule.textFieldSplits?.[fieldId];
